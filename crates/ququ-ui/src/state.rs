@@ -300,6 +300,8 @@ pub struct UiState {
     pub column_filter: String,
     /// 選択中オブジェクトのカラム一覧
     pub columns: Vec<ColumnDetail>,
+    /// カラム詳細ペインで選択中のカラムインデックス
+    pub selected_column_idx: Option<usize>,
     /// カラム読込完了後に全項目 SELECT 文を挿入待ちのテーブル名
     pub pending_select_insert_table: Option<String>,
 
@@ -365,6 +367,7 @@ impl UiState {
             selected_object_idx: None,
             column_filter: String::new(),
             columns: Vec::new(),
+            selected_column_idx: None,
             pending_select_insert_table: None,
             login_dialog,
             show_version_dialog: false,

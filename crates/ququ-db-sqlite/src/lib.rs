@@ -194,13 +194,14 @@ impl DbSession for SqliteSession {
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map([], |row| {
             let name: String = row.get(1)?;
-            let data_type: String = row.get(2)?;
+            let raw_type: String = row.get(2)?;
+            let (data_type, length) = split_type_and_length(&raw_type);
             let notnull: i64 = row.get(3)?;
             let pk: i64 = row.get(5)?;
             Ok(ColumnDetail {
                 name,
                 data_type,
-                length: String::new(),
+                length,
                 nullable: notnull == 0,
                 is_pk: pk > 0,
                 comments: String::new(),
@@ -231,9 +232,53 @@ impl DbSession for SqliteSession {
     }
 }
 
+/// SQLite の型定義文字列（例: `char(20)`, `number(10, 2)`）から型名と長さ部分を分離する。
+fn split_type_and_length(raw: &str) -> (String, String) {
+    let trimmed = raw.trim();
+    if let Some(open_idx) = trimmed.find('(')
+        && let Some(rel_close) = trimmed[open_idx + 1..].rfind(')')
+    {
+        let type_name = trimmed[..open_idx].trim().to_string();
+        let inner = trimmed[open_idx + 1..open_idx + 1 + rel_close]
+            .split(',')
+            .map(str::trim)
+            .collect::<Vec<_>>()
+            .join(",");
+        return (type_name, inner);
+    }
+    (trimmed.to_string(), String::new())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn splits_sqlite_type_and_length() {
+        assert_eq!(
+            split_type_and_length("char(20)"),
+            ("char".to_string(), "20".to_string())
+        );
+        assert_eq!(
+            split_type_and_length("number(10, 2)"),
+            ("number".to_string(), "10,2".to_string())
+        );
+        assert_eq!(
+            split_type_and_length("number"),
+            ("number".to_string(), String::new())
+        );
+
+        let mut sess = SqliteSession::open(":memory:").unwrap();
+        sess.execute_ddl("CREATE TABLE sample (id number(10), pass char(20), note text)")
+            .unwrap();
+        let cols = sess.list_columns("main", "sample").unwrap();
+        assert!(cols[0].data_type.eq_ignore_ascii_case("number"));
+        assert_eq!(cols[0].length, "10");
+        assert!(cols[1].data_type.eq_ignore_ascii_case("char"));
+        assert_eq!(cols[1].length, "20");
+        assert!(cols[2].data_type.eq_ignore_ascii_case("text"));
+        assert_eq!(cols[2].length, "");
+    }
 
     #[test]
     fn manual_transaction_prevents_accidental_commit() {

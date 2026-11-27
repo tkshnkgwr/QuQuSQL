@@ -135,11 +135,13 @@ pub fn render_object_list_pane(
                         if is_selected {
                             ui.painter().rect_filled(ui.max_rect(), 0.0, theme.grid_selected_bg);
                         }
+                        ui.add(egui::Label::new(RichText::new(&obj.name)).selectable(false));
+                        // 文字の後ろの余白を含め、セル矩形全体でクリック・右クリック・指アイコンを受け付ける
                         let resp = ui
-                            .add(
-                                egui::Label::new(RichText::new(&obj.name))
-                                    .selectable(false)
-                                    .sense(Sense::click()),
+                            .interact(
+                                ui.max_rect(),
+                                ui.id().with(("obj_cell", orig_idx, 0)),
+                                Sense::click(),
                             )
                             .on_hover_cursor(egui::CursorIcon::PointingHand);
                         if resp.clicked() {
@@ -182,11 +184,12 @@ pub fn render_object_list_pane(
                         if is_selected {
                             ui.painter().rect_filled(ui.max_rect(), 0.0, theme.grid_selected_bg);
                         }
+                        ui.add(egui::Label::new(&obj.comments).selectable(false));
                         let resp = ui
-                            .add(
-                                egui::Label::new(&obj.comments)
-                                    .selectable(false)
-                                    .sense(Sense::click()),
+                            .interact(
+                                ui.max_rect(),
+                                ui.id().with(("obj_cell", orig_idx, 1)),
+                                Sense::click(),
                             )
                             .on_hover_cursor(egui::CursorIcon::PointingHand);
                         if resp.clicked() {
@@ -243,7 +246,7 @@ pub fn render_object_list_pane(
 }
 
 /// 右下ペイン：選択中オブジェクトのカラム詳細一覧とフィルタを描画する。
-pub fn render_object_detail_pane(ui: &mut Ui, state: &mut UiState) {
+pub fn render_object_detail_pane(ui: &mut Ui, state: &mut UiState, theme: &AppTheme) {
     ui.vertical(|ui| {
         ui.horizontal(|ui| {
             ui.selectable_value(&mut true, true, "Column");
@@ -284,6 +287,7 @@ pub fn render_object_detail_pane(ui: &mut Ui, state: &mut UiState) {
             .map(|(i, _)| i)
             .collect();
 
+        let mut new_col_selection: Option<usize> = None;
         let mut insert_col: Option<String> = None;
 
         TableBuilder::new(ui)
@@ -319,42 +323,121 @@ pub fn render_object_detail_pane(ui: &mut Ui, state: &mut UiState) {
             })
             .body(|body| {
                 body.rows(20.0, filtered.len(), |mut row| {
-                    let col = &state.columns[filtered[row.index()]];
+                    let orig_idx = filtered[row.index()];
+                    let col = &state.columns[orig_idx];
+                    let is_selected = state.selected_column_idx == Some(orig_idx);
+
                     row.col(|ui| {
+                        if is_selected {
+                            ui.painter().rect_filled(ui.max_rect(), 0.0, theme.grid_selected_bg);
+                        }
                         let label = if col.is_pk {
                             RichText::new(format!("* {}", col.name)).strong()
                         } else {
                             RichText::new(&col.name)
                         };
+                        ui.add(egui::Label::new(label).selectable(false));
                         let resp = ui
-                            .add(
-                                egui::Label::new(label)
-                                    .selectable(false)
-                                    .sense(Sense::click()),
+                            .interact(
+                                ui.max_rect(),
+                                ui.id().with(("col_cell", orig_idx, 0)),
+                                Sense::click(),
                             )
                             .on_hover_cursor(egui::CursorIcon::PointingHand);
+                        if resp.clicked() {
+                            new_col_selection = Some(orig_idx);
+                        }
                         if resp.double_clicked() {
                             insert_col = Some(col.name.clone());
                         }
                     });
                     row.col(|ui| {
+                        if is_selected {
+                            ui.painter().rect_filled(ui.max_rect(), 0.0, theme.grid_selected_bg);
+                        }
                         ui.add(egui::Label::new(&col.data_type).selectable(false));
+                        let resp = ui
+                            .interact(
+                                ui.max_rect(),
+                                ui.id().with(("col_cell", orig_idx, 1)),
+                                Sense::click(),
+                            )
+                            .on_hover_cursor(egui::CursorIcon::PointingHand);
+                        if resp.clicked() {
+                            new_col_selection = Some(orig_idx);
+                        }
+                        if resp.double_clicked() {
+                            insert_col = Some(col.name.clone());
+                        }
                     });
                     row.col(|ui| {
-                        ui.add(egui::Label::new(&col.length).selectable(false));
+                        if is_selected {
+                            ui.painter().rect_filled(ui.max_rect(), 0.0, theme.grid_selected_bg);
+                        }
+                        ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                            ui.add(egui::Label::new(&col.length).selectable(false));
+                        });
+                        let resp = ui
+                            .interact(
+                                ui.max_rect(),
+                                ui.id().with(("col_cell", orig_idx, 2)),
+                                Sense::click(),
+                            )
+                            .on_hover_cursor(egui::CursorIcon::PointingHand);
+                        if resp.clicked() {
+                            new_col_selection = Some(orig_idx);
+                        }
+                        if resp.double_clicked() {
+                            insert_col = Some(col.name.clone());
+                        }
                     });
                     row.col(|ui| {
+                        if is_selected {
+                            ui.painter().rect_filled(ui.max_rect(), 0.0, theme.grid_selected_bg);
+                        }
                         ui.add(
                             egui::Label::new(if col.nullable { "Y" } else { "N" })
                                 .selectable(false),
                         );
+                        let resp = ui
+                            .interact(
+                                ui.max_rect(),
+                                ui.id().with(("col_cell", orig_idx, 3)),
+                                Sense::click(),
+                            )
+                            .on_hover_cursor(egui::CursorIcon::PointingHand);
+                        if resp.clicked() {
+                            new_col_selection = Some(orig_idx);
+                        }
+                        if resp.double_clicked() {
+                            insert_col = Some(col.name.clone());
+                        }
                     });
                     row.col(|ui| {
+                        if is_selected {
+                            ui.painter().rect_filled(ui.max_rect(), 0.0, theme.grid_selected_bg);
+                        }
                         ui.add(egui::Label::new(&col.comments).selectable(false));
+                        let resp = ui
+                            .interact(
+                                ui.max_rect(),
+                                ui.id().with(("col_cell", orig_idx, 4)),
+                                Sense::click(),
+                            )
+                            .on_hover_cursor(egui::CursorIcon::PointingHand);
+                        if resp.clicked() {
+                            new_col_selection = Some(orig_idx);
+                        }
+                        if resp.double_clicked() {
+                            insert_col = Some(col.name.clone());
+                        }
                     });
                 });
             });
 
+        if let Some(idx) = new_col_selection {
+            state.selected_column_idx = Some(idx);
+        }
         if let Some(col_name) = insert_col {
             state.insert_into_active_editor(&col_name);
         }

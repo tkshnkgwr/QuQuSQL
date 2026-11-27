@@ -540,7 +540,7 @@ fn render_right_area(
     ui.allocate_new_ui(
         egui::UiBuilder::new().id_salt("right_bottom_pane").max_rect(bottom_rect),
         |ui| {
-            render_object_detail_pane(ui, state);
+            render_object_detail_pane(ui, state, theme);
         },
     );
 }

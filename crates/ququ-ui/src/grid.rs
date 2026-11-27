@@ -109,11 +109,16 @@ pub fn render_result_grid(
             body.rows(row_height, rs.row_count, |mut row| {
                 let row_idx = row.index();
                 row.col(|ui| {
-                    ui.label(
-                        RichText::new(format!("{}", row_idx + 1))
-                            .small()
-                            .color(theme.editor_gutter_fg),
-                    );
+                    ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(format!("{}", row_idx + 1))
+                                    .small()
+                                    .color(theme.editor_gutter_fg),
+                            )
+                            .selectable(false),
+                        );
+                    });
                 });
 
                 for col_idx in 0..col_count {
@@ -134,7 +139,21 @@ pub fn render_result_grid(
                             RichText::new(&cell_buf)
                         };
 
-                        let resp = ui.add(egui::Label::new(rich).sense(Sense::click()));
+                        // 数値型（Int / Float / Decimal）は右寄せ、それ以外は左寄せで描画する
+                        if val.is_numeric() {
+                            ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                                ui.add(egui::Label::new(rich).selectable(false));
+                            });
+                        } else {
+                            ui.add(egui::Label::new(rich).selectable(false));
+                        }
+
+                        // 文字の上だけでなくセル余白を含めた全体をクリック対象にする
+                        let resp = ui.interact(
+                            ui.max_rect(),
+                            ui.id().with(("grid_cell", row_idx, col_idx)),
+                            Sense::click(),
+                        );
                         if resp.clicked() {
                             clicked_cell = Some((row_idx, col_idx));
                         }

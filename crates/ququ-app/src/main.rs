@@ -117,6 +117,7 @@ impl QuQuApp {
                     self.state.objects.clear();
                     self.state.columns.clear();
                     self.state.selected_object_idx = None;
+                    self.state.selected_column_idx = None;
                     self.state.pending_select_insert_table = None;
                     self.state.status_notice = Some(format!("接続しました: {db_info}"));
                     ctx.send_viewport_cmd(egui::ViewportCommand::Title(self.state.window_title()));
@@ -129,6 +130,7 @@ impl QuQuApp {
                     self.state.owners.clear();
                     self.state.objects.clear();
                     self.state.columns.clear();
+                    self.state.selected_column_idx = None;
                     self.state.pending_select_insert_table = None;
                     self.state.status_notice = Some("切断しました。".to_string());
                     ctx.send_viewport_cmd(egui::ViewportCommand::Title(self.state.window_title()));
@@ -237,6 +239,7 @@ impl QuQuApp {
                     self.state.objects = objects;
                     self.state.selected_object_idx = None;
                     self.state.columns.clear();
+                    self.state.selected_column_idx = None;
                 }
                 DbEvent::ColumnsLoaded {
                     owner: _,
@@ -244,6 +247,7 @@ impl QuQuApp {
                     columns,
                 } => {
                     self.state.columns = columns;
+                    self.state.selected_column_idx = None;
                     // 右クリック「SELECT 文を挿入 (全項目)」の待機中テーブルであればここでエディタへ展開する
                     if let Some(pending_table) = self.state.pending_select_insert_table.take()
                         && pending_table.eq_ignore_ascii_case(&table_name)
