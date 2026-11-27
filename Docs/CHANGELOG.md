@@ -8,6 +8,14 @@
 
 ---
 
+## [0.0.5-alpha] - 2026-11-27
+
+### Changed
+- **ライセンス変更 (`Cargo.toml`, `LICENSE`, `README.md`)**: プロジェクトのライセンスを `GPL-3.0-or-later`（GNU General Public License v3.0 or later）へ統一し、ルートに `LICENSE` ファイルを追加。
+- **プロジェクトルート `README.md` 刷新**: バッジ、開発方針、主な特徴、7 クレート構成の Mermaid アーキテクチャ図・責務表、ビルド／テスト手順、ドキュメント一覧を整備。
+
+---
+
 ## [0.0.4-alpha] - 2026-11-27
 
 ### Added (Phase 2: テーブル直接編集・UI 強化)
