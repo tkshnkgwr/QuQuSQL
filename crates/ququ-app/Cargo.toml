@@ -1,0 +1,17 @@
+[package]
+name = "ququ-app"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+ququ-core.workspace = true
+ququ-db.workspace = true
+ququ-db-sqlite.workspace = true
+ququ-db-oracle.workspace = true
+ququ-ui.workspace = true
+eframe.workspace = true
+egui.workspace = true
+mimalloc.workspace = true
+anyhow.workspace = true

@@ -1,0 +1,57 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/ququ-core",
+    "crates/ququ-sql",
+    "crates/ququ-db",
+    "crates/ququ-db-sqlite",
+    "crates/ququ-db-oracle",
+    "crates/ququ-ui",
+    "crates/ququ-app",
+]
+default-members = ["crates/ququ-app"]
+
+[workspace.package]
+version = "0.0.1-alpha"
+edition = "2024"
+authors = ["QuQuSQL developers"]
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+ququ-core = { path = "crates/ququ-core" }
+ququ-sql = { path = "crates/ququ-sql" }
+ququ-db = { path = "crates/ququ-db" }
+ququ-db-sqlite = { path = "crates/ququ-db-sqlite" }
+ququ-db-oracle = { path = "crates/ququ-db-oracle" }
+ququ-ui = { path = "crates/ququ-ui" }
+
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+compact_str = { version = "0.8", features = ["serde"] }
+regex = "1.11"
+chrono = { version = "0.4", features = ["clock"] }
+crossbeam-channel = "0.5"
+directories = "5"
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+oracle-rs = "0.1"
+eframe = { version = "0.31", default-features = false, features = ["glow", "default_fonts"] }
+egui = "0.31"
+egui_extras = "0.31"
+mimalloc = { version = "0.1", default-features = false }
+rfd = "0.15"
+
+# --- ハイブリッド最適化ビルドプロファイル ---
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.dev]
+opt-level = 1
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true

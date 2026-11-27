@@ -1,0 +1,13 @@
+[package]
+name = "ququ-db-sqlite"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+ququ-core.workspace = true
+ququ-db.workspace = true
+rusqlite.workspace = true
+anyhow.workspace = true
+compact_str.workspace = true

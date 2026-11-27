@@ -1,0 +1,15 @@
+[package]
+name = "ququ-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+compact_str.workspace = true
+chrono.workspace = true
+directories.workspace = true
+regex.workspace = true
