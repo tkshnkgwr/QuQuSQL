@@ -1,3 +1,5 @@
+//! 行番号ガター・シンタックスハイライト・検索置換パネルを備えた SQL エディタウィジェット。
+
 use crate::state::{FindReplaceState, SqlTab};
 use crate::theme::AppTheme;
 use egui::text::{CCursor, CCursorRange, LayoutJob};
@@ -5,6 +7,7 @@ use egui::{Align, Color32, FontFamily, FontId, RichText, TextFormat, Ui};
 use ququ_sql::{TokenKind, tokenize};
 use regex::{Regex, RegexBuilder};
 
+/// 左上ペインの SQL エディタ本体および検索・置換バーを描画する。
 pub fn render_editor_pane(
     ui: &mut Ui,
     tab: &mut SqlTab,
@@ -20,7 +23,7 @@ pub fn render_editor_pane(
 
     let editor_id = ui.make_persistent_id(format!("sql_editor_{}", tab.id));
 
-    // 検索ジャンプ等で予約された選択範囲を反映
+    // 検索ジャンプ等で予約された選択範囲をカーソル状態へ反映する
     if let Some((start_b, end_b)) = find_replace.pending_select_range.take() {
         let c_start = byte_to_char_idx(&tab.text, start_b);
         let c_end = byte_to_char_idx(&tab.text, end_b);
@@ -46,7 +49,7 @@ pub fn render_editor_pane(
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
                     ui.horizontal_top(|ui| {
-                        // 左ガター：行番号
+                        // 左ガター：行番号（エディタのスクロールと同期して表示する）
                         let mut line_nums = String::with_capacity(line_count * 5);
                         for idx in 1..=line_count {
                             if idx > 1 {
@@ -70,7 +73,7 @@ pub fn render_editor_pane(
                                 );
                             });
 
-                        // SQL シンタックスハイライト Layouter
+                        // SQL シンタックスハイライト用の Layouter
                         let theme_clone = theme.clone();
                         let font_clone = font_id.clone();
                         let mut layouter = |ui: &Ui, text: &str, wrap_width: f32| {
@@ -94,6 +97,7 @@ pub fn render_editor_pane(
                             tab.dirty = true;
                         }
 
+                        // 現在のカーソル位置・選択範囲をバイトオフセットへ変換して保持する
                         if let Some(range) = output.cursor_range {
                             let primary = range.primary.ccursor.index;
                             let secondary = range.secondary.ccursor.index;
@@ -116,6 +120,7 @@ pub fn render_editor_pane(
         });
 }
 
+/// 検索・置換パネルを描画する。
 fn render_find_replace_bar(ui: &mut Ui, tab: &mut SqlTab, state: &mut FindReplaceState) {
     let matches = find_all_matches(&tab.text, state);
     let match_count = matches.len();
@@ -189,6 +194,7 @@ fn render_find_replace_bar(ui: &mut Ui, tab: &mut SqlTab, state: &mut FindReplac
         });
 }
 
+/// `ququ_sql::tokenize` の結果をもとに色付き `LayoutJob` を生成する。
 fn build_highlight_job(text: &str, theme: &AppTheme, font_id: FontId) -> LayoutJob {
     let mut job = LayoutJob::default();
     let tokens = tokenize(text);
@@ -216,6 +222,7 @@ fn build_highlight_job(text: &str, theme: &AppTheme, font_id: FontId) -> LayoutJ
     job
 }
 
+/// 検索条件に応じた正規表現オブジェクトをコンパイルする。
 fn compile_search_regex(state: &FindReplaceState) -> Option<Regex> {
     if state.query.is_empty() {
         return None;
@@ -231,6 +238,7 @@ fn compile_search_regex(state: &FindReplaceState) -> Option<Regex> {
         .ok()
 }
 
+/// エディタテキスト内の全マッチ位置（開始・終了バイトオフセット）を返す。
 fn find_all_matches(text: &str, state: &FindReplaceState) -> Vec<(usize, usize)> {
     let Some(re) = compile_search_regex(state) else {
         return Vec::new();
@@ -238,6 +246,7 @@ fn find_all_matches(text: &str, state: &FindReplaceState) -> Vec<(usize, usize)>
     re.find_iter(text).map(|m| (m.start(), m.end())).collect()
 }
 
+/// 次または前のマッチ箇所へカーソル・選択範囲をジャンプする。
 fn jump_to_match(
     tab: &SqlTab,
     state: &mut FindReplaceState,
@@ -266,6 +275,7 @@ fn jump_to_match(
     }
 }
 
+/// 現在選択中（または次の）マッチ箇所を 1 件だけ置換し、次の候補へ進む。
 fn replace_current_or_next(
     tab: &mut SqlTab,
     state: &mut FindReplaceState,
@@ -305,6 +315,7 @@ fn replace_current_or_next(
     }
 }
 
+/// すべてのマッチ箇所を後ろから順に一括置換する（オフセットずれを防ぐため逆順処理）。
 fn replace_all_matches(
     tab: &mut SqlTab,
     state: &mut FindReplaceState,
@@ -322,21 +333,78 @@ fn replace_all_matches(
     state.status_msg = format!("{count} 件置換しました");
 }
 
+/// バイトインデックスを UTF-8 文字インデックス（`CCursor` 用）へ変換する。
 fn byte_to_char_idx(s: &str, byte_idx: usize) -> usize {
     let clamped = byte_idx.min(s.len());
     s[..clamped].chars().count()
 }
 
+/// UTF-8 文字インデックスをバイトインデックスへ変換する。
 fn char_to_byte_idx(s: &str, char_idx: usize) -> usize {
     s.char_indices()
         .nth(char_idx)
         .map_or(s.len(), |(byte_i, _)| byte_i)
 }
 
+/// バイトオフセットから 1 始まりの `(行, 列)` を計算する。
 fn offset_to_line_col(s: &str, byte_offset: usize) -> (usize, usize) {
     let prefix = &s[..byte_offset.min(s.len())];
     let line = prefix.bytes().filter(|&b| b == b'\n').count() + 1;
     let last_nl = prefix.rfind('\n').map_or(0, |idx| idx + 1);
     let col = prefix[last_nl..].chars().count() + 1;
     (line, col)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn finds_and_replaces_case_insensitive_and_regex() {
+        let mut tab = SqlTab::new(1, "q.sql", "select A, a_id from dual;");
+        let mut fr = FindReplaceState {
+            open: true,
+            show_replace: true,
+            query: "a".to_string(),
+            replace_with: "b".to_string(),
+            case_sensitive: false,
+            use_regex: false,
+            ..Default::default()
+        };
+
+        let matches = find_all_matches(&tab.text, &fr);
+        assert_eq!(matches.len(), 3); // "A", "a", "a"(dual)
+
+        fr.case_sensitive = true;
+        let cs_matches = find_all_matches(&tab.text, &fr);
+        assert_eq!(cs_matches.len(), 2);
+
+        replace_all_matches(&mut tab, &mut fr, &cs_matches);
+        assert_eq!(tab.text, "select A, b_id from dubl;");
+        assert!(tab.dirty);
+
+        let re_fr = FindReplaceState {
+            query: r"\b[A-Z]\b".to_string(),
+            case_sensitive: true,
+            use_regex: true,
+            ..Default::default()
+        };
+        assert_eq!(find_all_matches(&tab.text, &re_fr).len(), 1);
+    }
+
+    #[test]
+    fn replaces_single_match_and_computes_japanese_line_col() {
+        let mut tab = SqlTab::new(1, "q.sql", "SELECT 'あいう' FROM t;\nSELECT 'あいう' FROM u;");
+        let mut fr = FindReplaceState {
+            query: "あいう".to_string(),
+            replace_with: "かきくけこ".to_string(),
+            ..Default::default()
+        };
+        let matches = find_all_matches(&tab.text, &fr);
+        replace_current_or_next(&mut tab, &mut fr, &matches);
+        assert!(tab.text.starts_with("SELECT 'かきくけこ' FROM t;"));
+
+        let second_line_start = tab.text.find("SELECT 'あいう'").unwrap();
+        assert_eq!(offset_to_line_col(&tab.text, second_line_start), (2, 1));
+    }
 }

@@ -1,3 +1,8 @@
+//! QuQuSQL デスクトップアプリケーションのエントリポイント。
+//!
+//! `mimalloc` アロケータ、Windows 日本語フォント読込、`eframe` (`glow`) 起動、
+//! および UI 層（`ququ-ui`）と非同期 DB ワーカー（`ququ-db`）間のイベント連携を担当します。
+
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use anyhow::Result;
@@ -9,6 +14,7 @@ use ququ_core::{
 use ququ_db::{DbCommand, DbEvent, DbSession, DbSessionFactory, DbWorker};
 use ququ_db_oracle::OracleSession;
 use ququ_db_sqlite::SqliteSession;
+use ququ_ui::browser::format_full_select_sql;
 use ququ_ui::dialogs::open_exit_confirm;
 use ququ_ui::state::BottomTab;
 use ququ_ui::{AppAction, AppTheme, UiState, render_main_ui};
@@ -16,9 +22,11 @@ use std::fs;
 use std::path::Path;
 use std::sync::Arc;
 
+/// 高速描画・大量データ処理時のアロケーション遅延を抑えるグローバルアロケータ。
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+/// SQLite / Oracle 両対応の統一セッションファクトリ。
 struct UnifiedDbFactory;
 
 impl DbSessionFactory for UnifiedDbFactory {
@@ -39,6 +47,7 @@ impl DbSessionFactory for UnifiedDbFactory {
     }
 }
 
+/// アプリケーション全体の実行時コンテキスト。
 struct QuQuApp {
     state: UiState,
     worker: DbWorker,
@@ -47,6 +56,7 @@ struct QuQuApp {
 }
 
 impl QuQuApp {
+    /// 設定・接続プロファイルを読み込み、DB ワーカーを起動して初期化する。
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         setup_japanese_fonts(&cc.egui_ctx);
 
@@ -82,11 +92,15 @@ impl QuQuApp {
         }
     }
 
+    /// バックグラウンド DB ワーカーから届いたイベントを処理し UI 状態へ反映する。
     fn process_db_events(&mut self, ctx: &egui::Context) {
         while let Some(ev) = self.worker.try_recv() {
             self.state.busy = false;
             match ev {
-                DbEvent::Connected { profile_id, db_info } => {
+                DbEvent::Connected {
+                    profile_id,
+                    db_info,
+                } => {
                     if let Some(prof) = self
                         .pending_profile
                         .take()
@@ -103,6 +117,7 @@ impl QuQuApp {
                     self.state.objects.clear();
                     self.state.columns.clear();
                     self.state.selected_object_idx = None;
+                    self.state.pending_select_insert_table = None;
                     self.state.status_notice = Some(format!("接続しました: {db_info}"));
                     ctx.send_viewport_cmd(egui::ViewportCommand::Title(self.state.window_title()));
                     self.worker.send(DbCommand::LoadOwners);
@@ -114,12 +129,14 @@ impl QuQuApp {
                     self.state.owners.clear();
                     self.state.objects.clear();
                     self.state.columns.clear();
+                    self.state.pending_select_insert_table = None;
                     self.state.status_notice = Some("切断しました。".to_string());
                     ctx.send_viewport_cmd(egui::ViewportCommand::Title(self.state.window_title()));
                 }
                 DbEvent::QueryFinished {
                     sql,
                     outcome,
+                    is_ddl,
                     has_uncommitted: _,
                     uncommitted_count,
                 } => {
@@ -148,6 +165,17 @@ impl QuQuApp {
                             self.state.bottom_tab = BottomTab::Log;
                             self.state.status_notice = Some(msg);
                         }
+                    }
+
+                    // DDL 実行時にサイドバーのオブジェクト一覧が表示中であれば自動で再読込する
+                    if is_ddl
+                        && self.state.window_state.show_browser
+                        && !self.state.selected_owner.is_empty()
+                    {
+                        self.worker.send(DbCommand::LoadObjects {
+                            owner: self.state.selected_owner.clone(),
+                            object_type: self.state.selected_object_type.clone(),
+                        });
                     }
                 }
                 DbEvent::FetchedMore { result } => {
@@ -212,18 +240,42 @@ impl QuQuApp {
                 }
                 DbEvent::ColumnsLoaded {
                     owner: _,
-                    table_name: _,
+                    table_name,
                     columns,
                 } => {
                     self.state.columns = columns;
+                    // 右クリック「SELECT 文を挿入 (全項目)」の待機中テーブルであればここでエディタへ展開する
+                    if let Some(pending_table) = self.state.pending_select_insert_table.take()
+                        && pending_table.eq_ignore_ascii_case(&table_name)
+                    {
+                        let sql = format_full_select_sql(&table_name, &self.state.columns);
+                        self.state.insert_into_active_editor(&sql);
+                        self.state.status_notice =
+                            Some(format!("{table_name} の全項目 SELECT 文を挿入しました。"));
+                    }
                 }
-                DbEvent::DdlLoaded { .. } => {}
+                DbEvent::DdlLoaded { name, ddl } => {
+                    // 取得した DDL を整形してアクティブな SQL エディタへ貼り付ける
+                    let trimmed = ddl.trim();
+                    let snippet = if trimmed.is_empty() {
+                        format!("-- DDL が見つかりません: {name}\n")
+                    } else if trimmed.ends_with(';') {
+                        format!("{trimmed}\n")
+                    } else {
+                        format!("{trimmed};\n")
+                    };
+                    self.state.insert_into_active_editor(&snippet);
+                    self.state.status_notice =
+                        Some(format!("{name} の DDL をエディタへ貼り付けました。"));
+                }
                 DbEvent::Error { context, message } => {
                     if context == "接続エラー" {
                         self.pending_profile = None;
                         self.state.login_dialog.error_msg = Some(message.clone());
                     }
-                    self.state.push_log(context, format!("Error: {message}"), true, None);
+                    self.state.pending_select_insert_table = None;
+                    self.state
+                        .push_log(context, format!("Error: {message}"), true, None);
                     self.state.bottom_tab = BottomTab::Log;
                     self.state.status_notice = Some("エラーが発生しました（ログ確認）".to_string());
                 }
@@ -231,6 +283,7 @@ impl QuQuApp {
         }
     }
 
+    /// UI 層から受け取ったアクションを DB ワーカーコマンドや永続化処理へ振り分ける。
     fn dispatch_actions(&mut self, ctx: &egui::Context, actions: Vec<AppAction>) {
         for action in actions {
             match action {
@@ -279,6 +332,22 @@ impl QuQuApp {
                 AppAction::LoadColumns { owner, table_name } => {
                     self.worker.send(DbCommand::LoadColumns { owner, table_name });
                 }
+                AppAction::LoadDdl {
+                    owner,
+                    object_type,
+                    name,
+                } => {
+                    self.state.busy = true;
+                    self.worker.send(DbCommand::LoadDdl {
+                        owner,
+                        object_type,
+                        name,
+                    });
+                }
+                AppAction::InsertFullSelect { owner, table_name } => {
+                    self.state.pending_select_insert_table = Some(table_name.clone());
+                    self.worker.send(DbCommand::LoadColumns { owner, table_name });
+                }
                 AppAction::SaveProfiles => {
                     if let Some(storage) = &self.state.storage {
                         let file = ConnectionsFile {
@@ -302,6 +371,7 @@ impl QuQuApp {
 }
 
 impl eframe::App for QuQuApp {
+    /// 毎フレーム（イベント駆動）で DB イベント処理・終了ガード・UI 描画を実行する。
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.process_db_events(ctx);
 
@@ -310,7 +380,7 @@ impl eframe::App for QuQuApp {
             AppTheme::for_mode(self.last_dark_mode).apply_to_ctx(ctx);
         }
 
-        // 未コミット変更がある状態でのウィンドウ終了をガード
+        // 未コミット変更がある状態でのウィンドウ終了をガードする
         if ctx.input(|i| i.viewport().close_requested())
             && !self.state.allow_force_exit
             && self.state.uncommitted_count > 0
@@ -328,6 +398,7 @@ impl eframe::App for QuQuApp {
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(self.state.window_title()));
     }
 
+    /// アプリ終了時にウィンドウサイズ・ペイン分割比・設定を保存する。
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         if let Some(storage) = &self.state.storage {
             let _ = storage.save_window_state(&self.state.window_state);
@@ -336,6 +407,7 @@ impl eframe::App for QuQuApp {
     }
 }
 
+/// Windows システム標準の日本語フォントを優先順で探索し `egui` へ登録する。
 fn setup_japanese_fonts(ctx: &egui::Context) {
     let candidates = [
         r"C:\Windows\Fonts\BIZ-UDGothicR.ttc",
@@ -345,26 +417,27 @@ fn setup_japanese_fonts(ctx: &egui::Context) {
     ];
 
     for path in candidates {
-        if Path::new(path).is_file() {
-            if let Ok(bytes) = fs::read(path) {
-                let mut fonts = FontDefinitions::default();
-                fonts
-                    .font_data
-                    .insert("jp_system".to_owned(), Arc::new(FontData::from_owned(bytes)));
+        if Path::new(path).is_file()
+            && let Ok(bytes) = fs::read(path)
+        {
+            let mut fonts = FontDefinitions::default();
+            fonts
+                .font_data
+                .insert("jp_system".to_owned(), Arc::new(FontData::from_owned(bytes)));
 
-                if let Some(fam) = fonts.families.get_mut(&FontFamily::Proportional) {
-                    fam.insert(0, "jp_system".to_owned());
-                }
-                if let Some(fam) = fonts.families.get_mut(&FontFamily::Monospace) {
-                    fam.push("jp_system".to_owned());
-                }
-                ctx.set_fonts(fonts);
-                break;
+            if let Some(fam) = fonts.families.get_mut(&FontFamily::Proportional) {
+                fam.insert(0, "jp_system".to_owned());
             }
+            if let Some(fam) = fonts.families.get_mut(&FontFamily::Monospace) {
+                fam.push("jp_system".to_owned());
+            }
+            ctx.set_fonts(fonts);
+            break;
         }
     }
 }
 
+/// アプリケーション起動エントリポイント（描画バックエンド: `glow`）。
 fn main() -> eframe::Result<()> {
     let initial_ws = StoragePaths::resolve()
         .map(|s| s.load_window_state())

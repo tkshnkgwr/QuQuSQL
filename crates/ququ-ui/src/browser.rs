@@ -1,9 +1,12 @@
+//! 右側のオブジェクトブラウザ（オブジェクト一覧ペイン・カラム詳細ペイン）の UI 実装モジュール。
+
 use crate::state::{AppAction, UiState};
 use crate::theme::AppTheme;
 use egui::{Align, RichText, Sense, Ui};
 use egui_extras::{Column, TableBuilder};
-use ququ_core::ObjectType;
+use ququ_core::{ColumnDetail, ObjectType};
 
+/// 右上ペイン：スキーマ選択・オブジェクト種別・フィルタ・オブジェクト一覧を描画する。
 pub fn render_object_list_pane(
     ui: &mut Ui,
     state: &mut UiState,
@@ -13,7 +16,7 @@ pub fn render_object_list_pane(
     let is_connected = state.active_profile.is_some();
 
     ui.vertical(|ui| {
-        // owner / type / filter 操作部
+        // owner / type / filter の操作ヘッダー部
         egui::Grid::new("obj_browser_controls")
             .num_columns(2)
             .spacing([6.0, 4.0])
@@ -29,14 +32,13 @@ pub fn render_object_list_pane(
                     .width(ui.available_width().max(100.0))
                     .show_ui(ui, |ui| {
                         for owner in &state.owners {
-                            ui.selectable_value(
-                                &mut state.selected_owner,
-                                owner.clone(),
-                                owner,
-                            );
+                            ui.selectable_value(&mut state.selected_owner, owner.clone(), owner);
                         }
                     });
-                if is_connected && state.selected_owner != prev_owner && !state.selected_owner.is_empty() {
+                if is_connected
+                    && state.selected_owner != prev_owner
+                    && !state.selected_owner.is_empty()
+                {
                     actions.push(AppAction::LoadObjects {
                         owner: state.selected_owner.clone(),
                         object_type: state.selected_object_type.clone(),
@@ -58,7 +60,10 @@ pub fn render_object_list_pane(
                             );
                         }
                     });
-                if is_connected && state.selected_object_type != prev_type && !state.selected_owner.is_empty() {
+                if is_connected
+                    && state.selected_object_type != prev_type
+                    && !state.selected_owner.is_empty()
+                {
                     actions.push(AppAction::LoadObjects {
                         owner: state.selected_owner.clone(),
                         object_type: state.selected_object_type.clone(),
@@ -83,7 +88,7 @@ pub fn render_object_list_pane(
 
         ui.separator();
 
-        // フィルタ適用済みインデックスリスト
+        // フィルタ文字列に一致するオブジェクトのインデックスを抽出
         let filter_lower = state.object_filter.trim().to_ascii_lowercase();
         let filtered_indices: Vec<usize> = state
             .objects
@@ -100,6 +105,8 @@ pub fn render_object_list_pane(
         let mut new_selection: Option<usize> = None;
         let mut insert_text: Option<String> = None;
         let mut copy_text: Option<String> = None;
+        let mut load_ddl_target: Option<(String, ObjectType, String)> = None;
+        let mut full_select_target: Option<(usize, String, String)> = None;
 
         TableBuilder::new(ui)
             .id_salt("object_list_table")
@@ -110,10 +117,12 @@ pub fn render_object_list_pane(
             .column(Column::remainder().at_least(60.0).clip(true))
             .header(22.0, |mut header| {
                 header.col(|ui| {
-                    ui.label(RichText::new("OBJECT_NAME").strong());
+                    ui.add(
+                        egui::Label::new(RichText::new("OBJECT_NAME").strong()).selectable(false),
+                    );
                 });
                 header.col(|ui| {
-                    ui.label(RichText::new("COMMENTS").strong());
+                    ui.add(egui::Label::new(RichText::new("COMMENTS").strong()).selectable(false));
                 });
             })
             .body(|body| {
@@ -145,12 +154,23 @@ pub fn render_object_list_pane(
                                 ui.close_menu();
                             }
                             if ui.button("SELECT 文を挿入").clicked() {
-                                insert_text = Some(format!(
-                                    "SELECT * FROM {};\n",
-                                    obj.name
+                                insert_text = Some(format!("SELECT * FROM {};\n", obj.name));
+                                ui.close_menu();
+                            }
+                            if ui.button("SELECT 文を挿入 (全項目)").clicked() {
+                                full_select_target =
+                                    Some((orig_idx, obj.owner.clone(), obj.name.clone()));
+                                ui.close_menu();
+                            }
+                            if ui.button("DDL を取得").clicked() {
+                                load_ddl_target = Some((
+                                    obj.owner.clone(),
+                                    obj.object_type.clone(),
+                                    obj.name.clone(),
                                 ));
                                 ui.close_menu();
                             }
+                            ui.separator();
                             if ui.button("オブジェクト名をコピー").clicked() {
                                 copy_text = Some(obj.name.clone());
                                 ui.close_menu();
@@ -179,19 +199,42 @@ pub fn render_object_list_pane(
                 });
             });
 
-        if let Some(idx) = new_selection {
-            if state.selected_object_idx != Some(idx) {
-                state.selected_object_idx = Some(idx);
-                if let Some(obj) = state.objects.get(idx) {
-                    actions.push(AppAction::LoadColumns {
-                        owner: obj.owner.clone(),
-                        table_name: obj.name.clone(),
-                    });
-                }
+        // 選択行が変わったらカラム詳細を非同期取得する
+        if let Some(idx) = new_selection
+            && state.selected_object_idx != Some(idx)
+        {
+            state.selected_object_idx = Some(idx);
+            if let Some(obj) = state.objects.get(idx) {
+                actions.push(AppAction::LoadColumns {
+                    owner: obj.owner.clone(),
+                    table_name: obj.name.clone(),
+                });
             }
         }
+
+        // 右クリック「SELECT 文を挿入 (全項目)」の処理
+        if let Some((idx, owner, table_name)) = full_select_target {
+            if state.selected_object_idx == Some(idx) && !state.columns.is_empty() {
+                let sql = format_full_select_sql(&table_name, &state.columns);
+                state.insert_into_active_editor(&sql);
+            } else {
+                // カラム未取得のオブジェクトの場合は先にカラム取得を要求して到着後に挿入する
+                state.selected_object_idx = Some(idx);
+                actions.push(AppAction::InsertFullSelect { owner, table_name });
+            }
+        }
+
+        // 右クリック「DDL を取得」の処理
+        if let Some((owner, object_type, name)) = load_ddl_target {
+            actions.push(AppAction::LoadDdl {
+                owner,
+                object_type,
+                name,
+            });
+        }
+
         if let Some(snippet) = insert_text {
-            insert_into_active_editor(state, &snippet);
+            state.insert_into_active_editor(&snippet);
         }
         if let Some(txt) = copy_text {
             ui.ctx().copy_text(txt);
@@ -199,6 +242,7 @@ pub fn render_object_list_pane(
     });
 }
 
+/// 右下ペイン：選択中オブジェクトのカラム詳細一覧とフィルタを描画する。
 pub fn render_object_detail_pane(ui: &mut Ui, state: &mut UiState) {
     ui.vertical(|ui| {
         ui.horizontal(|ui| {
@@ -254,19 +298,23 @@ pub fn render_object_detail_pane(ui: &mut Ui, state: &mut UiState) {
             .column(Column::remainder().at_least(50.0).clip(true))
             .header(22.0, |mut header| {
                 header.col(|ui| {
-                    ui.label(RichText::new("column name").strong());
+                    ui.add(
+                        egui::Label::new(RichText::new("column name").strong()).selectable(false),
+                    );
                 });
                 header.col(|ui| {
-                    ui.label(RichText::new("data type").strong());
+                    ui.add(
+                        egui::Label::new(RichText::new("data type").strong()).selectable(false),
+                    );
                 });
                 header.col(|ui| {
-                    ui.label(RichText::new("len").strong());
+                    ui.add(egui::Label::new(RichText::new("len").strong()).selectable(false));
                 });
                 header.col(|ui| {
-                    ui.label(RichText::new("n").strong());
+                    ui.add(egui::Label::new(RichText::new("n").strong()).selectable(false));
                 });
                 header.col(|ui| {
-                    ui.label(RichText::new("comments").strong());
+                    ui.add(egui::Label::new(RichText::new("comments").strong()).selectable(false));
                 });
             })
             .body(|body| {
@@ -296,7 +344,10 @@ pub fn render_object_detail_pane(ui: &mut Ui, state: &mut UiState) {
                         ui.add(egui::Label::new(&col.length).selectable(false));
                     });
                     row.col(|ui| {
-                        ui.add(egui::Label::new(if col.nullable { "Y" } else { "N" }).selectable(false));
+                        ui.add(
+                            egui::Label::new(if col.nullable { "Y" } else { "N" })
+                                .selectable(false),
+                        );
                     });
                     row.col(|ui| {
                         ui.add(egui::Label::new(&col.comments).selectable(false));
@@ -305,16 +356,57 @@ pub fn render_object_detail_pane(ui: &mut Ui, state: &mut UiState) {
             });
 
         if let Some(col_name) = insert_col {
-            insert_into_active_editor(state, &col_name);
+            state.insert_into_active_editor(&col_name);
         }
     });
 }
 
-fn insert_into_active_editor(state: &mut UiState, snippet: &str) {
-    if let Some(tab) = state.active_tab_mut() {
-        let pos = tab.cursor_byte_offset.min(tab.text.len());
-        tab.text.insert_str(pos, snippet);
-        tab.cursor_byte_offset = pos + snippet.len();
-        tab.dirty = true;
+/// カラム一覧から全項目を展開した整形済み SELECT 文を生成する。
+pub fn format_full_select_sql(table_name: &str, columns: &[ColumnDetail]) -> String {
+    if columns.is_empty() {
+        return format!("SELECT * FROM {table_name};\n");
+    }
+    let cols_block = columns
+        .iter()
+        .map(|c| format!("    {}", c.name))
+        .collect::<Vec<_>>()
+        .join(",\n");
+    format!("SELECT\n{cols_block}\nFROM {table_name};\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn formats_full_select_with_all_columns() {
+        let cols = vec![
+            ColumnDetail {
+                name: "ID".to_string(),
+                data_type: "NUMBER".to_string(),
+                length: "10".to_string(),
+                nullable: false,
+                is_pk: true,
+                comments: String::new(),
+            },
+            ColumnDetail {
+                name: "USER_NAME".to_string(),
+                data_type: "VARCHAR2".to_string(),
+                length: "100".to_string(),
+                nullable: true,
+                is_pk: false,
+                comments: String::new(),
+            },
+        ];
+        let sql = format_full_select_sql("USERS", &cols);
+        assert_eq!(sql, "SELECT\n    ID,\n    USER_NAME\nFROM USERS;\n");
+    }
+
+    #[test]
+    fn falls_back_to_star_when_columns_empty() {
+        assert_eq!(
+            format_full_select_sql("EMPTY_TBL", &[]),
+            "SELECT * FROM EMPTY_TBL;\n"
+        );
     }
 }

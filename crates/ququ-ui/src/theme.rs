@@ -1,28 +1,49 @@
+//! アプリ全体の配色テーマ（ライト / ダーク）および環境区分カラー定義モジュール。
+
 use egui::{Color32, Visuals};
 use ququ_core::{ConnectionProfile, EnvironmentTier};
 
+/// SQL シンタックスハイライト、エディタ、グリッド、ログで使用する配色セット。
 #[derive(Debug, Clone)]
 pub struct AppTheme {
+    /// ダークテーマかどうか
     pub dark_mode: bool,
+    /// エディタ背景色
     pub editor_bg: Color32,
+    /// 行番号ガター背景色
     pub editor_gutter_bg: Color32,
+    /// 行番号文字色
     pub editor_gutter_fg: Color32,
+    /// SQL キーワード文字色
     pub keyword: Color32,
+    /// 文字列リテラル文字色
     pub string_lit: Color32,
+    /// 数値リテラル文字色
     pub number_lit: Color32,
+    /// コメント文字色
     pub comment: Color32,
+    /// バインド変数文字色
     pub bind_var: Color32,
+    /// 通常識別子文字色
     pub identifier: Color32,
+    /// 演算子・記号文字色
     pub operator: Color32,
+    /// `<NULL>` や補助テキストの文字色
     pub null_fg: Color32,
+    /// ログのタイムスタンプ文字色
     pub log_timestamp: Color32,
+    /// ログのエラーメッセージ文字色
     pub log_error: Color32,
+    /// グリッドの交互行背景色
     pub grid_stripe: Color32,
+    /// グリッド・一覧の選択セル／行背景色
     pub grid_selected_bg: Color32,
+    /// スプリッタ（境界ドラッグバー）背景色
     pub splitter_bg: Color32,
 }
 
 impl AppTheme {
+    /// OSqlEdit 風の視認性重視ライトテーマを返す。
     pub fn light() -> Self {
         Self {
             dark_mode: false,
@@ -45,6 +66,7 @@ impl AppTheme {
         }
     }
 
+    /// 夜間作業や暗色環境向けのダークテーマを返す。
     pub fn dark() -> Self {
         Self {
             dark_mode: true,
@@ -67,10 +89,12 @@ impl AppTheme {
         }
     }
 
+    /// ダークモードフラグに応じたテーマを返す。
     pub fn for_mode(dark: bool) -> Self {
         if dark { Self::dark() } else { Self::light() }
     }
 
+    /// `egui::Context` のビジュアル設定へテーマを適用する。
     pub fn apply_to_ctx(&self, ctx: &egui::Context) {
         let mut visuals = if self.dark_mode {
             Visuals::dark()
@@ -86,6 +110,7 @@ impl AppTheme {
     }
 }
 
+/// 環境区分に対応する識別カラーを返す。
 pub fn env_color(env: EnvironmentTier) -> Color32 {
     match env {
         EnvironmentTier::Local => Color32::from_rgb(45, 164, 78),
@@ -95,6 +120,7 @@ pub fn env_color(env: EnvironmentTier) -> Color32 {
     }
 }
 
+/// `#RRGGBB` 形式のカラー文字列を `Color32` へ変換する（不正な場合は `fallback`）。
 pub fn parse_hex_color(hex: &str, fallback: Color32) -> Color32 {
     let s = hex.trim().trim_start_matches('#');
     if s.len() != 6 {
@@ -112,6 +138,21 @@ pub fn parse_hex_color(hex: &str, fallback: Color32) -> Color32 {
     Color32::from_rgb(r, g, b)
 }
 
+/// プロファイルに設定されたアクセントカラー（未設定・不正時は環境デフォルト色）を返す。
 pub fn profile_accent_color(profile: &ConnectionProfile) -> Color32 {
     parse_hex_color(&profile.accent_color, env_color(profile.env))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_hex_color_with_fallback() {
+        assert_eq!(
+            parse_hex_color("#D1242F", Color32::BLACK),
+            Color32::from_rgb(209, 36, 47)
+        );
+        assert_eq!(parse_hex_color("invalid", Color32::WHITE), Color32::WHITE);
+    }
 }

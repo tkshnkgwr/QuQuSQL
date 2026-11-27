@@ -1,24 +1,40 @@
+//! SQL ソースコードをトークン列へ分解する軽量レキサーモジュール。
+
 use std::ops::Range;
 
+/// SQL トークンの種別。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TokenKind {
+    /// SQL 予約語・組み込み関数名
     Keyword,
+    /// テーブル名・列名等の識別子
     Identifier,
+    /// シングルクォートで囲まれた文字列リテラル
     StringLiteral,
+    /// 数値リテラル
     Number,
+    /// 行コメント (`--`) またはブロックコメント (`/* ... */`)
     Comment,
+    /// バインド変数 (`:name`)
     BindVar,
+    /// 演算子記号
     Operator,
+    /// セミコロン・カンマ・括弧等の区切り記号
     Punctuation,
+    /// 空白・改行文字
     Whitespace,
 }
 
+/// 元の文字列内のバイト範囲を伴う 1 トークン。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Token {
+    /// トークン種別
     pub kind: TokenKind,
+    /// 元文字列内のバイトオフセット範囲
     pub range: Range<usize>,
 }
 
+/// シンタックスハイライト対象の代表的な SQL / Oracle / SQLite キーワード一覧。
 const KEYWORDS: &[&str] = &[
     "SELECT", "FROM", "WHERE", "AND", "OR", "NOT", "IN", "IS", "NULL", "AS", "ON", "JOIN",
     "INNER", "LEFT", "RIGHT", "FULL", "OUTER", "CROSS", "ORDER", "BY", "GROUP", "HAVING",
@@ -35,11 +51,13 @@ const KEYWORDS: &[&str] = &[
     "TIMESTAMP", "CLOB", "BLOB", "TEXT", "REAL",
 ];
 
+/// 指定単語が SQL キーワード（大文字・小文字不問）であるかを判定する。
 pub fn is_sql_keyword(word: &str) -> bool {
     let upper = word.to_ascii_uppercase();
     KEYWORDS.contains(&upper.as_str())
 }
 
+/// SQL 文字列を先頭から走査してトークン列へ分解する。
 pub fn tokenize(sql: &str) -> Vec<Token> {
     let mut tokens = Vec::new();
     let bytes = sql.as_bytes();
@@ -50,7 +68,7 @@ pub fn tokenize(sql: &str) -> Vec<Token> {
         let start = i;
         let b = bytes[i];
 
-        // 空白文字
+        // 連続する空白文字
         if b.is_ascii_whitespace() {
             while i < len && bytes[i].is_ascii_whitespace() {
                 i += 1;
@@ -62,7 +80,7 @@ pub fn tokenize(sql: &str) -> Vec<Token> {
             continue;
         }
 
-        // 行コメント --
+        // 行コメント (`-- ...`)
         if b == b'-' && i + 1 < len && bytes[i + 1] == b'-' {
             i += 2;
             while i < len && bytes[i] != b'\n' {
@@ -75,7 +93,7 @@ pub fn tokenize(sql: &str) -> Vec<Token> {
             continue;
         }
 
-        // ブロックコメント /* ... */
+        // ブロックコメント (`/* ... */`)
         if b == b'/' && i + 1 < len && bytes[i + 1] == b'*' {
             i += 2;
             while i + 1 < len && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
@@ -89,14 +107,14 @@ pub fn tokenize(sql: &str) -> Vec<Token> {
             continue;
         }
 
-        // シングルクォート文字列リテラル
+        // シングルクォート文字列リテラル（`''` エスケープ対応）
         if b == b'\'' {
             i += 1;
             while i < len {
                 if bytes[i] == b'\'' {
                     i += 1;
                     if i < len && bytes[i] == b'\'' {
-                        i += 1; // '' エスケープ
+                        i += 1;
                         continue;
                     }
                     break;
@@ -110,7 +128,7 @@ pub fn tokenize(sql: &str) -> Vec<Token> {
             continue;
         }
 
-        // ダブルクォート識別子
+        // ダブルクォート識別子（`""` エスケープ対応）
         if b == b'"' {
             i += 1;
             while i < len {
@@ -131,10 +149,15 @@ pub fn tokenize(sql: &str) -> Vec<Token> {
             continue;
         }
 
-        // バインド変数 :name
-        if b == b':' && i + 1 < len && (bytes[i + 1].is_ascii_alphanumeric() || bytes[i + 1] == b'_') {
+        // バインド変数 (`:name`)
+        if b == b':'
+            && i + 1 < len
+            && (bytes[i + 1].is_ascii_alphanumeric() || bytes[i + 1] == b'_')
+        {
             i += 2;
-            while i < len && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_' || bytes[i] == b'$') {
+            while i < len
+                && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_' || bytes[i] == b'$')
+            {
                 i += 1;
             }
             tokens.push(Token {
@@ -157,7 +180,7 @@ pub fn tokenize(sql: &str) -> Vec<Token> {
             continue;
         }
 
-        // 識別子またはキーワード (UTF-8 非ASCII文字も識別子の一部として扱う)
+        // 識別子またはキーワード（日本語等の非 ASCII 文字も識別子の一部として扱う）
         if b.is_ascii_alphabetic() || b == b'_' || b >= 0x80 {
             let ch_len = sql[i..].chars().next().map_or(1, char::len_utf8);
             i += ch_len;
@@ -204,4 +227,26 @@ pub fn tokenize(sql: &str) -> Vec<Token> {
     }
 
     tokens
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tokenizes_bind_vars_escaped_strings_and_japanese_identifiers() {
+        let sql = "SELECT \"ユーザー名\", 'it''s;ok' /* cmt */ FROM USERS WHERE id = :user_id";
+        let tokens = tokenize(sql);
+        let kinds_and_text: Vec<(TokenKind, &str)> = tokens
+            .iter()
+            .filter(|t| t.kind != TokenKind::Whitespace)
+            .map(|t| (t.kind, &sql[t.range.clone()]))
+            .collect();
+
+        assert!(kinds_and_text.contains(&(TokenKind::Keyword, "SELECT")));
+        assert!(kinds_and_text.contains(&(TokenKind::Identifier, "\"ユーザー名\"")));
+        assert!(kinds_and_text.contains(&(TokenKind::StringLiteral, "'it''s;ok'")));
+        assert!(kinds_and_text.contains(&(TokenKind::Comment, "/* cmt */")));
+        assert!(kinds_and_text.contains(&(TokenKind::BindVar, ":user_id")));
+    }
 }

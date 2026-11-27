@@ -1,3 +1,7 @@
+//! DB 接続抽象化トレイトおよびバックグラウンド DB ワーカーを提供するクレート。
+
+#![warn(missing_docs)]
+
 pub mod session;
 pub mod worker;
 

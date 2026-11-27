@@ -1,3 +1,10 @@
+//! Pure Rust ドライバ（`oracle-rs`）を用いた Oracle Database 接続実装。
+//!
+//! Oracle Instant Client（OCI / ODPI-C）を必要とせず、
+//! TNS プロトコル over TCP で直接 Oracle サーバーと通信します。
+
+#![warn(missing_docs)]
+
 use anyhow::{Context, Result, anyhow};
 use compact_str::CompactString;
 use oracle_rs::{ColumnInfo, Config, Connection, Row, Value};
@@ -11,6 +18,7 @@ use std::fs;
 use std::time::Instant;
 use tokio::runtime::Runtime;
 
+/// 接続プロファイルと認証情報（および必要に応じて `tnsnames.ora`）から `oracle_rs::Config` を生成する。
 pub fn build_oracle_config(
     profile: &ConnectionProfile,
     credentials: &ConnectCredentials,
@@ -46,8 +54,12 @@ pub fn build_oracle_config(
             let tns_path = find_tnsnames_path(tns_admin_override).ok_or_else(|| {
                 anyhow!("tnsnames.ora が見つかりません。設定画面または環境変数 TNS_ADMIN を確認してください。")
             })?;
-            let content = fs::read_to_string(&tns_path)
-                .with_context(|| format!("tnsnames.ora の読み込みに失敗しました: {}", tns_path.display()))?;
+            let content = fs::read_to_string(&tns_path).with_context(|| {
+                format!(
+                    "tnsnames.ora の読み込みに失敗しました: {}",
+                    tns_path.display()
+                )
+            })?;
             let entries = parse_tnsnames(&content);
             let entry = entries
                 .into_iter()
@@ -79,12 +91,14 @@ pub fn build_oracle_config(
     }
 }
 
+/// 「さらに取得」用に保持する開いた Oracle カーソル情報。
 struct PendingCursor {
     sql: String,
     cursor_id: u16,
     columns: Vec<ColumnInfo>,
 }
 
+/// Oracle Database セッション。内部で専用 Tokio ランタイムを保持し同期トレイトへ橋渡しする。
 pub struct OracleSession {
     rt: Runtime,
     conn: Connection,
@@ -94,6 +108,7 @@ pub struct OracleSession {
 }
 
 impl OracleSession {
+    /// 指定されたプロファイルとパスワードを使って Oracle へ接続する。
     pub fn connect(
         profile: &ConnectionProfile,
         credentials: &ConnectCredentials,
@@ -119,6 +134,7 @@ impl OracleSession {
         })
     }
 
+    /// `oracle-rs` の列情報を `ququ-core` の `ColumnMeta` へ変換する。
     fn convert_columns(oracle_cols: &[ColumnInfo]) -> Vec<ColumnMeta> {
         oracle_cols
             .iter()
@@ -130,6 +146,7 @@ impl OracleSession {
             .collect()
     }
 
+    /// 取得行を省メモリ `ResultSet` へ追記する。
     fn push_rows(rs: &mut ResultSet, rows: Vec<Row>) {
         for row in rows {
             let cells = row.into_values().into_iter().map(convert_value).collect();
@@ -158,6 +175,7 @@ impl DbSession for OracleSession {
             fetch_limit
         };
 
+        // 初期フェッチ上限に達するまで 500 行単位で追加フェッチを行う
         while has_more && rs.row_count < limit {
             let remaining = (limit - rs.row_count).min(500) as u32;
             let next = self
@@ -171,6 +189,7 @@ impl DbSession for OracleSession {
             Self::push_rows(&mut rs, next.rows);
         }
 
+        // 未取得行が残っていればカーソル ID を保持して後続の「さらに取得」に備える
         if has_more && cursor_id > 0 {
             self.pending_cursor = Some(PendingCursor {
                 sql: sql.to_string(),
@@ -234,7 +253,7 @@ impl DbSession for OracleSession {
 
     fn execute_ddl(&mut self, sql: &str) -> Result<()> {
         self.rt.block_on(self.conn.execute(sql, &[]))?;
-        // Oracle では DDL 実行時に暗黙 COMMIT が走る
+        // Oracle では DDL 実行時にサーバー側で暗黙 COMMIT が発生する
         self.uncommitted_ops = 0;
         Ok(())
     }
@@ -292,7 +311,10 @@ impl DbSession for OracleSession {
 
         let res = self.rt.block_on(self.conn.query(
             sql,
-            &[Value::String(owner.to_string()), Value::String(obj_type_str.to_string())],
+            &[
+                Value::String(owner.to_string()),
+                Value::String(obj_type_str.to_string()),
+            ],
         ))?;
 
         let mut list = Vec::with_capacity(res.rows.len());
@@ -335,7 +357,10 @@ impl DbSession for OracleSession {
 
         let res = self.rt.block_on(self.conn.query(
             sql,
-            &[Value::String(owner.to_string()), Value::String(table_name.to_string())],
+            &[
+                Value::String(owner.to_string()),
+                Value::String(table_name.to_string()),
+            ],
         ))?;
 
         let mut cols = Vec::with_capacity(res.rows.len());
@@ -382,6 +407,7 @@ impl DbSession for OracleSession {
     }
 }
 
+/// `oracle-rs` の `Value` を QuQuSQL の省メモリ `CellValue`（ISO 日時・厳密 NUMBER 保持）へ変換する。
 fn convert_value(val: Value) -> CellValue {
     match val {
         Value::Null => CellValue::Null,
@@ -389,6 +415,7 @@ fn convert_value(val: Value) -> CellValue {
         Value::Bytes(b) => CellValue::Bytes(b.into()),
         Value::Integer(i) => CellValue::Int(i),
         Value::Float(f) => CellValue::Float(f),
+        // NUMBER は 16 桁以上の桁落ちを防ぐため文字列のまま保持する
         Value::Number(n) => CellValue::Decimal(CompactString::from(n.as_str())),
         Value::Date(d) => {
             let mut s = CompactString::default();
@@ -446,6 +473,77 @@ mod tests {
         assert_eq!(cfg.port, 1521);
         assert_eq!(cfg.service.service_name(), Some("FREEPDB1"));
         assert_eq!(cfg.username, "SCOTT");
+    }
+
+    #[test]
+    fn validates_missing_direct_fields_and_resolves_tns_file() {
+        let mut prof =
+            ConnectionProfile::new_template(EnvironmentTier::Development, ququ_core::DbType::Oracle);
+        let creds = ConnectCredentials {
+            password: Some("pw".to_string()),
+        };
+
+        // ユーザー名未入力はエラー
+        assert!(build_oracle_config(&prof, &creds, None).is_err());
+
+        // ホスト未入力はエラー
+        prof.username = "SCOTT".to_string();
+        prof.host = "   ".to_string();
+        assert!(build_oracle_config(&prof, &creds, None).is_err());
+
+        // TNS ファイルからの SERVICE_NAME / SID 解決
+        let temp_dir = std::env::temp_dir().join("ququ_tns_test");
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let tns_file = temp_dir.join("tnsnames.ora");
+        std::fs::write(
+            &tns_file,
+            r#"
+SVC_ALIAS = (DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=10.0.0.1)(PORT=1521))(CONNECT_DATA=(SERVICE_NAME=MYSVC)))
+SID_ALIAS = (DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=10.0.0.2)(PORT=1522))(CONNECT_DATA=(SID=MYSID)))
+"#,
+        )
+        .unwrap();
+
+        prof.connect_mode = OracleConnectMode::Tns;
+        prof.tns_name = "SVC_ALIAS".to_string();
+        let cfg1 = build_oracle_config(&prof, &creds, Some(tns_file.to_str().unwrap())).unwrap();
+        assert_eq!(cfg1.host, "10.0.0.1");
+        assert_eq!(cfg1.service.service_name(), Some("MYSVC"));
+
+        prof.tns_name = "SID_ALIAS".to_string();
+        let cfg2 = build_oracle_config(&prof, &creds, Some(tns_file.to_str().unwrap())).unwrap();
+        assert_eq!(cfg2.port, 1522);
+        assert_eq!(cfg2.service.sid(), Some("MYSID"));
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn converts_oracle_values_preserving_number_precision_and_iso_dates() {
+        use oracle_rs::types::{OracleDate, OracleNumber, OracleTimestamp};
+
+        let big_num = Value::Number(OracleNumber::new("9999999999999999999912345"));
+        assert_eq!(
+            convert_value(big_num),
+            CellValue::Decimal(CompactString::from("9999999999999999999912345"))
+        );
+
+        let dt = Value::Date(OracleDate::new(2026, 11, 27, 9, 5, 3));
+        assert_eq!(
+            convert_value(dt),
+            CellValue::DateTime(CompactString::from("2026-11-27 09:05:03"))
+        );
+
+        let ts = Value::Timestamp(OracleTimestamp::with_timezone(
+            2026, 11, 27, 14, 30, 0, 123000, 9, 0,
+        ));
+        assert_eq!(
+            convert_value(ts),
+            CellValue::DateTime(CompactString::from("2026-11-27 14:30:00.123000 +09:00"))
+        );
+
+        assert_eq!(convert_value(Value::Null), CellValue::Null);
+        assert_eq!(convert_value(Value::Boolean(false)), CellValue::Bool(false));
     }
 
     #[test]

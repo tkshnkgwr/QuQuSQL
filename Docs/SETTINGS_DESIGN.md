@@ -25,50 +25,28 @@
 
 ---
 
-## 2. `config.toml` の主要セクション設計
+## 2. `config.toml` の設定設計
+
+### Phase 1 実装済み構造（`AppConfig`）
+初期フェーズでは軽量・フラットな TOML 構造で保存します。
 
 ```toml
-[general]
-default_encoding = "utf-8"         # 新規ファイル作成時の文字コード（utf-8 / sjis / euc-jp）
-default_line_ending = "crlf"       # crlf / lf
-theme = "light-classic"
-confirm_on_exit_with_uncommitted = true
-
-[editor]
-font_family = "BIZ UDGothic"       # Windows システムフォント優先（フォールバックあり）
-font_size = 13.0
-tab_width = 4
-insert_spaces = true
-show_line_numbers = true
-show_ruler = true
-show_invisibles = false            # 半角/全角スペース・タブ・改行記号の可視化
-auto_complete = true
-
-[grid]
-default_fetch_limit = 1000         # 初期フェッチ件数（1,000行で一旦停止、追加/全件取得可）
-date_format = "YYYY-MM-DD HH:MM:SS" # 日時表示フォーマット（デフォルト ISO 形式）
-row_height = 22.0                  # 仮想スクロール用の固定行高
-show_null_placeholder = "<NULL>"
-show_cell_invisibles = false       # セル内改行・タブの可視化
-confirm_before_apply = true        # Apply 前に発行 SQL プレビューを表示
-
-[export]
-default_spec_format = "xlsx"       # テーブル仕様書出力のデフォルト形式（xlsx / md）
-csv_delimiter = ","
-csv_quote = "\""
-
-[oracle]
-tns_admin_path = ""                # 未指定時は環境変数 TNS_ADMIN を参照
-default_auto_commit = false        # 誤操作防止のためデフォルト手動コミット
-
-[keymap]
-execute_sql = "F5"
-execute_sql_alt = "Ctrl+Enter"
-explain_plan = "Ctrl+E"
-commit = "Ctrl+Shift+C"
-rollback = "Ctrl+Shift+R"
-toggle_browser = "F8"
+default_encoding = "utf-8"              # 新規タブ作成時の文字コード
+default_line_ending = "crlf"            # デフォルト改行コード
+dark_mode = false                       # false: ライトテーマ / true: ダークテーマ
+font_size = 13.5                        # エディタフォントサイズ
+default_fetch_limit = 1000              # 初期フェッチ上限行数（1,000行で一旦停止）
+date_format = "YYYY-MM-DD HH:MM:SS"     # 日時表示フォーマット（デフォルト ISO 形式）
+tns_admin_path = ""                     # tnsnames.ora 手動指定パス（空時は TNS_ADMIN 参照）
+confirm_where_less_dml = true           # WHERE 句なし UPDATE / DELETE 実行前に確認
+collapse_production_connections = true  # 接続一覧で本番セクションを初期折りたたみ
 ```
+
+### 将来拡張予定（Phase 2〜3）
+機能拡張に合わせて、以下の設定項目（行高・不可視文字表示・ショートカットカスタマイズ等）を順次追加します：
+- エディタ関連：`tab_width`, `insert_spaces`, `show_ruler`, `show_invisibles`, `auto_complete`
+- グリッド・出力関連：`row_height`, `show_cell_invisibles`, `confirm_before_apply`, `default_spec_format`, `csv_delimiter`
+- キーマップ：`[keymap]` セクションでの任意ショートカット再割当
 
 ---
 
@@ -133,8 +111,8 @@ accent_color = "#2DA44E"           # 緑系
 
 ## 4. ウィンドウ・レイアウト状態記憶 (`window_state.json`)
 
-- 記憶項目：ウィンドウ座標 `(x, y)`、サイズ `(width, height)`、最大化フラグ、左右ペイン分割比率、左上下分割比率、右上下分割比率、オブジェクトブラウザ表示/非表示。
-- **画面外脱出ガード**：マルチモニタ構成変更等で保存座標が現在の有効ディスプレイ外になった場合は、プライマリモニタ中央へ自動リセットして起動します。
+- 実装済み保存項目（`WindowState`）：ウィンドウサイズ（`width`, `height`）、左右分割比率（`left_panel_ratio`）、左上下分割比率（`left_split_ratio`）、右上下分割比率（`right_split_ratio`）、オブジェクトブラウザ表示状態（`show_browser`）。
+- 将来拡張予定：ウィンドウ座標 `(x, y)`・最大化フラグおよびマルチモニタ変更時の **画面外脱出ガード**。
 
 ---
 

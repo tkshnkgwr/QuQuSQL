@@ -1,12 +1,18 @@
+//! `rusqlite`（bundled）を用いた SQLite データベースドライバ実装。
+//!
+//! デフォルトで自動コミットを無効化するため、DML 実行前に明示的な
+//! `BEGIN TRANSACTION` を開始し、ユーザー操作でのみ確定・取消します。
+
+#![warn(missing_docs)]
+
 use anyhow::{Context, Result};
 use compact_str::CompactString;
-use ququ_core::{
-    CellValue, ColumnDetail, ColumnMeta, ObjectType, ResultSet, SchemaObject,
-};
+use ququ_core::{CellValue, ColumnDetail, ColumnMeta, ObjectType, ResultSet, SchemaObject};
 use ququ_db::DbSession;
 use rusqlite::{Connection, types::ValueRef};
 use std::time::Instant;
 
+/// SQLite データベースセッション。
 pub struct SqliteSession {
     conn: Connection,
     target_label: String,
@@ -14,6 +20,7 @@ pub struct SqliteSession {
 }
 
 impl SqliteSession {
+    /// 指定パスの SQLite ファイル（空文字または `:memory:` ならインメモリ）を開く。
     pub fn open(file_path: &str) -> Result<Self> {
         let trimmed = file_path.trim();
         let conn = if trimmed.is_empty() || trimmed == ":memory:" {
@@ -34,6 +41,7 @@ impl SqliteSession {
         })
     }
 
+    /// 自動コミット状態のままであれば、手動トランザクションを開始して不意な確定を防ぐ。
     fn ensure_manual_tx(&mut self) -> Result<()> {
         if self.conn.is_autocommit() {
             self.conn
@@ -43,12 +51,8 @@ impl SqliteSession {
         Ok(())
     }
 
-    fn run_query_window(
-        &mut self,
-        sql: &str,
-        offset: usize,
-        limit: usize,
-    ) -> Result<ResultSet> {
+    /// 指定されたオフセットと上限件数で SELECT クエリを実行し、結果セットを構築する。
+    fn run_query_window(&mut self, sql: &str, offset: usize, limit: usize) -> Result<ResultSet> {
         let start = Instant::now();
         let mut stmt = self.conn.prepare(sql)?;
         let col_count = stmt.column_count();
@@ -66,6 +70,7 @@ impl SqliteSession {
         rs.source_sql = Some(sql.to_string());
 
         let mut rows = stmt.query([])?;
+        // 追加フェッチ時は指定オフセットまで読み飛ばす
         let mut skipped = 0usize;
         while skipped < offset {
             if rows.next()?.is_none() {
@@ -78,6 +83,7 @@ impl SqliteSession {
         let max_rows = if limit == 0 { usize::MAX } else { limit };
         while let Some(row) = rows.next()? {
             if rs.row_count >= max_rows {
+                // 上限件数に達したため、さらに後続行が存在することを記録して一旦停止する
                 rs.has_more = true;
                 break;
             }
@@ -153,6 +159,7 @@ impl DbSession for SqliteSession {
     }
 
     fn list_owners(&mut self) -> Result<Vec<String>> {
+        // SQLite の標準メインデータベース名
         Ok(vec!["main".to_string()])
     }
 
@@ -268,11 +275,15 @@ mod tests {
         }
         sess.commit().unwrap();
 
-        let page1 = sess.execute_query("SELECT n, label FROM nums ORDER BY n", 10).unwrap();
+        let page1 = sess
+            .execute_query("SELECT n, label FROM nums ORDER BY n", 10)
+            .unwrap();
         assert_eq!(page1.row_count, 10);
         assert!(page1.has_more);
 
-        let page2 = sess.fetch_more("SELECT n, label FROM nums ORDER BY n", 10, 10).unwrap();
+        let page2 = sess
+            .fetch_more("SELECT n, label FROM nums ORDER BY n", 10, 10)
+            .unwrap();
         assert_eq!(page2.row_count, 5);
         assert!(!page2.has_more);
 
@@ -284,5 +295,53 @@ mod tests {
         assert_eq!(cols.len(), 2);
         assert!(cols[0].is_pk);
         assert!(!cols[1].nullable);
+
+        let ddl = sess.get_ddl("main", &ObjectType::Table, "nums").unwrap();
+        assert!(ddl.contains("CREATE TABLE nums"));
+    }
+
+    #[test]
+    fn roundtrips_all_value_types_and_rolls_back_update_delete() {
+        let mut sess = SqliteSession::open(":memory:").unwrap();
+        sess.execute_ddl("CREATE TABLE mix (id INTEGER PRIMARY KEY, f REAL, t TEXT, b BLOB)")
+            .unwrap();
+        sess.execute_dml("INSERT INTO mix VALUES (1, 3.5, 'こんにちは', X'CAFEBABE')")
+            .unwrap();
+        sess.execute_dml("INSERT INTO mix VALUES (2, NULL, NULL, NULL)")
+            .unwrap();
+        sess.commit().unwrap();
+
+        let rs = sess
+            .execute_query("SELECT id, f, t, b FROM mix ORDER BY id", 100)
+            .unwrap();
+        assert_eq!(rs.get(0, 0), Some(&CellValue::Int(1)));
+        assert_eq!(rs.get(0, 1), Some(&CellValue::Float(3.5)));
+        assert_eq!(
+            rs.get(0, 2),
+            Some(&CellValue::Text(CompactString::from("こんにちは")))
+        );
+        assert_eq!(
+            rs.get(0, 3),
+            Some(&CellValue::Bytes(vec![0xCA, 0xFE, 0xBA, 0xBE].into()))
+        );
+        assert_eq!(rs.get(1, 2), Some(&CellValue::Null));
+
+        // UPDATE と DELETE を実行した後に ROLLBACK で元に戻ること
+        let updated = sess
+            .execute_dml("UPDATE mix SET t = 'changed' WHERE id = 1")
+            .unwrap();
+        assert_eq!(updated, 1);
+        let deleted = sess.execute_dml("DELETE FROM mix WHERE id = 2").unwrap();
+        assert_eq!(deleted, 1);
+        sess.rollback().unwrap();
+
+        let after_rb = sess
+            .execute_query("SELECT id, t FROM mix ORDER BY id", 100)
+            .unwrap();
+        assert_eq!(after_rb.row_count, 2);
+        assert_eq!(
+            after_rb.get(0, 1),
+            Some(&CellValue::Text(CompactString::from("こんにちは")))
+        );
     }
 }

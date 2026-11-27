@@ -1,5 +1,7 @@
+//! メインウィンドウ全体の 2×2 スプリットペイン・メニュー・ツールバー・本番警告バナーを描画するモジュール。
+
 use crate::browser::{render_object_detail_pane, render_object_list_pane};
-use crate::dialogs::{render_confirm_modal, render_login_dialog};
+use crate::dialogs::{render_confirm_modal, render_login_dialog, render_version_dialog};
 use crate::editor::render_editor_pane;
 use crate::grid::render_result_grid;
 use crate::state::{AppAction, BottomTab, ConfirmAction, ConfirmModal, SqlTab, UiState};
@@ -8,6 +10,7 @@ use egui::{Align, Color32, Key, Modifiers, RichText, Sense, Ui};
 use ququ_sql::{StatementKind, analyze_statement, is_dml_without_where, statement_at_offset};
 use std::fs;
 
+/// メイン UI 全体を描画し、発生したユーザーアクション一覧を返す。
 pub fn render_main_ui(ctx: &egui::Context, state: &mut UiState, theme: &AppTheme) -> Vec<AppAction> {
     let mut actions = Vec::new();
 
@@ -17,10 +20,8 @@ pub fn render_main_ui(ctx: &egui::Context, state: &mut UiState, theme: &AppTheme
     egui::TopBottomPanel::top("menu_bar_panel").show(ctx, |ui| {
         if let Some(prof) = &state.active_profile {
             let accent = profile_accent_color(prof);
-            let (rect, _) = ui.allocate_exact_size(
-                egui::vec2(ui.available_width(), 3.0),
-                Sense::hover(),
-            );
+            let (rect, _) =
+                ui.allocate_exact_size(egui::vec2(ui.available_width(), 3.0), Sense::hover());
             ui.painter().rect_filled(rect, 0.0, accent);
         }
 
@@ -65,14 +66,20 @@ pub fn render_main_ui(ctx: &egui::Context, state: &mut UiState, theme: &AppTheme
             ui.menu_button("SQL(Q)", |ui| {
                 let connected = state.active_profile.is_some();
                 if ui
-                    .add_enabled(connected && !state.busy, egui::Button::new("▶ 実行 (F5 / Ctrl+Enter)"))
+                    .add_enabled(
+                        connected && !state.busy,
+                        egui::Button::new("▶ 実行 (F5 / Ctrl+Enter)"),
+                    )
                     .clicked()
                 {
                     request_execute_current_sql(state, &mut actions);
                     ui.close_menu();
                 }
                 if ui
-                    .add_enabled(connected && !state.busy && !state.read_only_session, egui::Button::new("Commit"))
+                    .add_enabled(
+                        connected && !state.busy && !state.read_only_session,
+                        egui::Button::new("Commit"),
+                    )
                     .clicked()
                 {
                     request_commit(state, &mut actions);
@@ -88,10 +95,16 @@ pub fn render_main_ui(ctx: &egui::Context, state: &mut UiState, theme: &AppTheme
             });
 
             ui.menu_button("表示(V)", |ui| {
-                if ui.checkbox(&mut state.window_state.show_browser, "オブジェクトブラウザ (F8)").clicked() {
+                if ui
+                    .checkbox(&mut state.window_state.show_browser, "オブジェクトブラウザ (F8)")
+                    .clicked()
+                {
                     ui.close_menu();
                 }
-                if ui.checkbox(&mut state.config.dark_mode, "ダークテーマ").clicked() {
+                if ui
+                    .checkbox(&mut state.config.dark_mode, "ダークテーマ")
+                    .clicked()
+                {
                     actions.push(AppAction::SaveConfig);
                     ui.close_menu();
                 }
@@ -110,52 +123,54 @@ pub fn render_main_ui(ctx: &egui::Context, state: &mut UiState, theme: &AppTheme
                     ui.close_menu();
                 }
             });
+
+            ui.menu_button("ヘルプ(H)", |ui| {
+                if ui.button("バージョン情報...").clicked() {
+                    state.show_version_dialog = true;
+                    ui.close_menu();
+                }
+            });
         });
     });
 
     // 2. 本番環境接続時の赤系常時警告バナー（誤爆防止の要）
-    if let Some(prof) = state.active_profile.clone() {
-        if prof.env.is_production() {
-            let red = env_color(prof.env);
-            egui::TopBottomPanel::top("prod_warning_banner")
-                .frame(
-                    egui::Frame::NONE
-                        .fill(Color32::from_rgb(195, 25, 35))
-                        .inner_margin(egui::Margin::symmetric(10, 5)),
-                )
-                .show(ctx, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.label(
-                            RichText::new(format!(
-                                "⚠ 本番環境に接続中: {} ({})   [状態: {}]",
-                                prof.name,
-                                prof.display_target(),
-                                if state.read_only_session {
-                                    "読み取り専用"
-                                } else {
-                                    "更新許可 (注意!)"
-                                }
-                            ))
-                            .strong()
-                            .color(Color32::WHITE),
-                        );
-                        ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
-                            let toggle_text = if state.read_only_session {
-                                "更新ロックを解除"
+    if let Some(prof) = state.active_profile.clone()
+        && prof.env.is_production()
+    {
+        egui::TopBottomPanel::top("prod_warning_banner")
+            .frame(
+                egui::Frame::NONE
+                    .fill(Color32::from_rgb(195, 25, 35))
+                    .inner_margin(egui::Margin::symmetric(10, 5)),
+            )
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new(format!(
+                            "⚠ 本番環境に接続中: {} ({})   [状態: {}]",
+                            prof.name,
+                            prof.display_target(),
+                            if state.read_only_session {
+                                "読み取り専用"
                             } else {
-                                "読み取り専用に戻す"
-                            };
-                            if ui
-                                .button(RichText::new(toggle_text).small().strong())
-                                .clicked()
-                            {
-                                state.read_only_session = !state.read_only_session;
+                                "更新許可 (注意!)"
                             }
-                            let _ = red;
-                        });
+                        ))
+                        .strong()
+                        .color(Color32::WHITE),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                        let toggle_text = if state.read_only_session {
+                            "更新ロックを解除"
+                        } else {
+                            "読み取り専用に戻す"
+                        };
+                        if ui.button(RichText::new(toggle_text).small().strong()).clicked() {
+                            state.read_only_session = !state.read_only_session;
+                        }
                     });
                 });
-        }
+            });
     }
 
     // 3. ツールバー
@@ -280,7 +295,7 @@ pub fn render_main_ui(ctx: &egui::Context, state: &mut UiState, theme: &AppTheme
         });
     });
 
-    // 5. メイン 2x2 スプリットペイン
+    // 5. メイン 2×2 スプリットペイン
     egui::CentralPanel::default().show(ctx, |ui| {
         let total_rect = ui.available_rect_before_wrap();
         let splitter_thickness = 5.0;
@@ -291,10 +306,8 @@ pub fn render_main_ui(ctx: &egui::Context, state: &mut UiState, theme: &AppTheme
             let split_x = total_rect.left() + left_w;
             let right_w = (total_rect.width() - left_w - splitter_thickness).max(160.0);
 
-            let left_rect = egui::Rect::from_min_size(
-                total_rect.min,
-                egui::vec2(left_w, total_rect.height()),
-            );
+            let left_rect =
+                egui::Rect::from_min_size(total_rect.min, egui::vec2(left_w, total_rect.height()));
             let v_split_rect = egui::Rect::from_min_size(
                 egui::pos2(split_x, total_rect.top()),
                 egui::vec2(splitter_thickness, total_rect.height()),
@@ -304,7 +317,7 @@ pub fn render_main_ui(ctx: &egui::Context, state: &mut UiState, theme: &AppTheme
                 egui::vec2(right_w, total_rect.height()),
             );
 
-            // 左エリア描画
+            // 左エリア描画（固有の id_salt を付与してウィジェット ID 衝突を防止）
             ui.allocate_new_ui(
                 egui::UiBuilder::new().id_salt("left_area").max_rect(left_rect),
                 |ui| {
@@ -313,11 +326,7 @@ pub fn render_main_ui(ctx: &egui::Context, state: &mut UiState, theme: &AppTheme
             );
 
             // 垂直スプリッタ操作
-            let v_resp = ui.interact(
-                v_split_rect,
-                ui.id().with("main_v_splitter"),
-                Sense::drag(),
-            );
+            let v_resp = ui.interact(v_split_rect, ui.id().with("main_v_splitter"), Sense::drag());
             ui.painter().rect_filled(v_split_rect, 0.0, theme.splitter_bg);
             if v_resp.hovered() || v_resp.dragged() {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
@@ -340,13 +349,15 @@ pub fn render_main_ui(ctx: &egui::Context, state: &mut UiState, theme: &AppTheme
         }
     });
 
-    // 6. モーダル（接続ダイアログ・安全確認モーダル）
+    // 6. モーダル（接続ダイアログ・安全確認モーダル・バージョン情報ダイアログ）
     render_login_dialog(ctx, state, theme, &mut actions);
     render_confirm_modal(ctx, state, &mut actions);
+    render_version_dialog(ctx, state);
 
     actions
 }
 
+/// 左側上下ペイン（上：SQL タブエディタ / 下：ログ・結果グリッド）を描画する。
 fn render_left_area(
     ui: &mut Ui,
     state: &mut UiState,
@@ -373,49 +384,50 @@ fn render_left_area(
     ui.allocate_new_ui(
         egui::UiBuilder::new().id_salt("left_top_pane").max_rect(top_rect),
         |ui| {
-        ui.horizontal(|ui| {
-            let tab_count = state.tabs.len();
-            let mut switch_to = None;
-            let mut close_idx = None;
-            for (idx, tab) in state.tabs.iter().enumerate() {
-                let label = if tab.dirty {
-                    format!("{} *", tab.title)
-                } else {
-                    tab.title.clone()
-                };
-                if ui.selectable_label(state.active_tab == idx, label).clicked() {
-                    switch_to = Some(idx);
+            ui.horizontal(|ui| {
+                let tab_count = state.tabs.len();
+                let mut switch_to = None;
+                let mut close_idx = None;
+                for (idx, tab) in state.tabs.iter().enumerate() {
+                    let label = if tab.dirty {
+                        format!("{} *", tab.title)
+                    } else {
+                        tab.title.clone()
+                    };
+                    if ui.selectable_label(state.active_tab == idx, label).clicked() {
+                        switch_to = Some(idx);
+                    }
+                    if tab_count > 1 && ui.small_button("×").clicked() {
+                        close_idx = Some(idx);
+                    }
                 }
-                if tab_count > 1 && ui.small_button("×").clicked() {
-                    close_idx = Some(idx);
+                if ui.small_button("+").clicked() {
+                    state.add_new_tab();
                 }
-            }
-            if ui.small_button("+").clicked() {
-                state.add_new_tab();
-            }
-            if let Some(i) = switch_to {
-                state.active_tab = i;
-            }
-            if let Some(i) = close_idx {
-                state.close_tab(i);
-            }
-        });
-        ui.separator();
+                if let Some(i) = switch_to {
+                    state.active_tab = i;
+                }
+                if let Some(i) = close_idx {
+                    state.close_tab(i);
+                }
+            });
+            ui.separator();
 
-        let font_size = state.config.font_size;
-        let active_idx = state.active_tab;
-        if active_idx < state.tabs.len() {
-            let mut find_replace = std::mem::take(&mut state.find_replace);
-            render_editor_pane(
-                ui,
-                &mut state.tabs[active_idx],
-                &mut find_replace,
-                theme,
-                font_size,
-            );
-            state.find_replace = find_replace;
-        }
-    });
+            let font_size = state.config.font_size;
+            let active_idx = state.active_tab;
+            if active_idx < state.tabs.len() {
+                let mut find_replace = std::mem::take(&mut state.find_replace);
+                render_editor_pane(
+                    ui,
+                    &mut state.tabs[active_idx],
+                    &mut find_replace,
+                    theme,
+                    font_size,
+                );
+                state.find_replace = find_replace;
+            }
+        },
+    );
 
     // 左上下スプリッタ
     let h_resp = ui.interact(split_rect, ui.id().with("left_h_splitter"), Sense::drag());
@@ -433,23 +445,25 @@ fn render_left_area(
     ui.allocate_new_ui(
         egui::UiBuilder::new().id_salt("left_bottom_pane").max_rect(bottom_rect),
         |ui| {
-        ui.horizontal(|ui| {
-            ui.selectable_value(&mut state.bottom_tab, BottomTab::Log, "ログ");
-            let grid_label = match &state.result {
-                Some(rs) => format!("結果グリッド ({}件)", rs.row_count),
-                None => "結果グリッド".to_string(),
-            };
-            ui.selectable_value(&mut state.bottom_tab, BottomTab::Grid, grid_label);
-        });
-        ui.separator();
+            ui.horizontal(|ui| {
+                ui.selectable_value(&mut state.bottom_tab, BottomTab::Log, "ログ");
+                let grid_label = match &state.result {
+                    Some(rs) => format!("結果グリッド ({}件)", rs.row_count),
+                    None => "結果グリッド".to_string(),
+                };
+                ui.selectable_value(&mut state.bottom_tab, BottomTab::Grid, grid_label);
+            });
+            ui.separator();
 
-        match state.bottom_tab {
-            BottomTab::Log => render_log_pane(ui, state, theme),
-            BottomTab::Grid => render_result_grid(ui, state, theme, actions),
-        }
-    });
+            match state.bottom_tab {
+                BottomTab::Log => render_log_pane(ui, state, theme),
+                BottomTab::Grid => render_result_grid(ui, state, theme, actions),
+            }
+        },
+    );
 }
 
+/// 左下ペインの実行ログタブを描画する。
 fn render_log_pane(ui: &mut Ui, state: &UiState, theme: &AppTheme) {
     egui::ScrollArea::both()
         .id_salt("query_log_scroll")
@@ -468,7 +482,11 @@ fn render_log_pane(ui: &mut Ui, state: &UiState, theme: &AppTheme) {
                 } else {
                     theme.identifier
                 };
-                ui.label(RichText::new(&entry.summary).monospace().color(summary_color));
+                ui.label(
+                    RichText::new(&entry.summary)
+                        .monospace()
+                        .color(summary_color),
+                );
                 ui.label(
                     RichText::new("------------------------------------------------------------")
                         .monospace()
@@ -478,6 +496,7 @@ fn render_log_pane(ui: &mut Ui, state: &UiState, theme: &AppTheme) {
         });
 }
 
+/// 右側上下ペイン（上：オブジェクト一覧 / 下：カラム詳細）を描画する。
 fn render_right_area(
     ui: &mut Ui,
     state: &mut UiState,
@@ -526,15 +545,15 @@ fn render_right_area(
     );
 }
 
+/// グローバルショートカットキー（F5 / Ctrl+Enter / Ctrl+F / Ctrl+H / Ctrl+N/O/S / F8）を処理する。
 fn handle_shortcuts(ctx: &egui::Context, state: &mut UiState, actions: &mut Vec<AppAction>) {
-    if state.confirm_modal.is_some() || state.login_dialog.open {
+    if state.confirm_modal.is_some() || state.login_dialog.open || state.show_version_dialog {
         return;
     }
 
     let (exec_pressed, find_pressed, replace_pressed, new_tab, open_file, save_file, toggle_browser) =
         ctx.input_mut(|i| {
-            let exec = i.key_pressed(Key::F5)
-                || i.consume_key(Modifiers::CTRL, Key::Enter);
+            let exec = i.key_pressed(Key::F5) || i.consume_key(Modifiers::CTRL, Key::Enter);
             let find = i.consume_key(Modifiers::CTRL, Key::F);
             let repl = i.consume_key(Modifiers::CTRL, Key::H);
             let new_t = i.consume_key(Modifiers::CTRL, Key::N);
@@ -569,6 +588,7 @@ fn handle_shortcuts(ctx: &egui::Context, state: &mut UiState, actions: &mut Vec<
     }
 }
 
+/// 選択範囲またはカーソル位置の SQL 文を抽出し、各種安全ガードを通した上で実行要求を発行する。
 fn request_execute_current_sql(state: &mut UiState, actions: &mut Vec<AppAction>) {
     let Some(tab) = state.active_tab_ref() else {
         return;
@@ -599,8 +619,13 @@ fn request_execute_current_sql(state: &mut UiState, actions: &mut Vec<AppAction>
         .as_ref()
         .is_some_and(|p| p.confirm_on_commit);
 
-    // 読み取り専用ガード
-    if state.read_only_session && matches!(kind, StatementKind::Dml | StatementKind::Ddl | StatementKind::Commit) {
+    // 読み取り専用セッション中の更新系 SQL ブロック
+    if state.read_only_session
+        && matches!(
+            kind,
+            StatementKind::Dml | StatementKind::Ddl | StatementKind::Commit
+        )
+    {
         state.push_log(
             sql_to_run,
             "エラー: 読み取り専用モードのため更新系 SQL はブロックされました。".to_string(),
@@ -636,8 +661,11 @@ fn request_execute_current_sql(state: &mut UiState, actions: &mut Vec<AppAction>
         return;
     }
 
-    // WHERE なし UPDATE / DELETE ガード
-    if kind == StatementKind::Dml && state.config.confirm_where_less_dml && is_dml_without_where(&sql_to_run) {
+    // WHERE 句なし UPDATE / DELETE の全件更新・削除ガード
+    if kind == StatementKind::Dml
+        && state.config.confirm_where_less_dml
+        && is_dml_without_where(&sql_to_run)
+    {
         state.confirm_modal = Some(ConfirmModal {
             title: "WHERE 句なしの更新/削除を検知".to_string(),
             message: if is_prod {
@@ -654,7 +682,7 @@ fn request_execute_current_sql(state: &mut UiState, actions: &mut Vec<AppAction>
         return;
     }
 
-    // 未コミット変更あり時の DDL 暗黙コミット警告
+    // 未コミット変更が残っている状態での DDL 実行（暗黙コミット警告）
     if kind == StatementKind::Ddl && state.uncommitted_count > 0 {
         state.confirm_modal = Some(ConfirmModal {
             title: "DDL 実行による暗黙コミットの警告".to_string(),
@@ -673,7 +701,7 @@ fn request_execute_current_sql(state: &mut UiState, actions: &mut Vec<AppAction>
         return;
     }
 
-    // 本番環境 / 確認有効環境での DML / DDL 実行前確認
+    // 本番環境または確認有効環境での DML / DDL 実行前確認
     if matches!(kind, StatementKind::Dml | StatementKind::Ddl) && (is_prod || confirm_dml_ddl) {
         let is_ddl = kind == StatementKind::Ddl;
         state.confirm_modal = Some(ConfirmModal {
@@ -707,6 +735,7 @@ fn request_execute_current_sql(state: &mut UiState, actions: &mut Vec<AppAction>
     });
 }
 
+/// ツールバーやメニューからのコミット押下時に確認ガードを通す。
 fn request_commit(state: &mut UiState, actions: &mut Vec<AppAction>) {
     let is_prod = state.is_production();
     let confirm_commit = state
@@ -740,6 +769,7 @@ fn request_commit(state: &mut UiState, actions: &mut Vec<AppAction>) {
     }
 }
 
+/// SQL ファイル選択ダイアログを開き、新しいタブとして読み込む。
 fn open_sql_file(state: &mut UiState) {
     let Some(path) = rfd::FileDialog::new()
         .add_filter("SQL ファイル", &["sql", "txt"])
@@ -764,6 +794,7 @@ fn open_sql_file(state: &mut UiState) {
     }
 }
 
+/// アクティブな SQL タブの内容をファイルへ保存する。
 fn save_active_tab(state: &mut UiState, force_dialog: bool) {
     let Some(tab) = state.active_tab_mut() else {
         return;
@@ -778,16 +809,16 @@ fn save_active_tab(state: &mut UiState, force_dialog: bool) {
         tab.file_path.clone()
     };
 
-    if let Some(path) = target {
-        if fs::write(&path, tab.text.as_bytes()).is_ok() {
-            tab.title = path
-                .file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or(&tab.title)
-                .to_string();
-            tab.file_path = Some(path);
-            tab.dirty = false;
-            state.status_notice = Some("ファイルを保存しました。".to_string());
-        }
+    if let Some(path) = target
+        && fs::write(&path, tab.text.as_bytes()).is_ok()
+    {
+        tab.title = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or(&tab.title)
+            .to_string();
+        tab.file_path = Some(path);
+        tab.dirty = false;
+        state.status_notice = Some("ファイルを保存しました。".to_string());
     }
 }

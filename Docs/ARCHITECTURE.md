@@ -59,7 +59,7 @@ graph TD
 ```
 
 > [!IMPORTANT]
-> `ququ-ui` は `ququ-db` に直接依存しません。UI はコマンド（`AppCommand`）を発行し、`ququ-app` が非同期ワーカー（`ququ-db`）へ橋渡しして結果データ（`ququ-core` の型）を UI に渡す **単方向データフロー** を採用します。これにより UI スレッドのブロッキングを構造的に防止します。
+> `ququ-ui` は `ququ-db` に直接依存しません。UI はコマンド（`AppAction`）を発行し、`ququ-app` が非同期ワーカー（`ququ-db`）へ橋渡しして結果データ（`ququ-core` の型）を UI に渡す **単方向データフロー** を採用します。これにより UI スレッドのブロッキングを構造的に防止します。
 
 ---
 
@@ -70,8 +70,9 @@ graph TD
   - 行ごとの `Vec<HashMap<String, String>>` のような重い構造は**禁止**。
   - 列メタデータ（`Vec<ColumnMeta>`）を 1 回だけ保持し、セル本体は **フラットな 1 次元配列 `Vec<CellValue>`**（インデックス = `row * col_count + col`）または列指向チャンクで保持し、ポインタオーバーヘッドとヒープ断片化を最小化。
 - **コンパクトセル型 (`CellValue`)**:
-  - `Null`, `Bool(bool)`, `Int(i64)`, `Float(f64)`, `Decimal(CompactString)`, `Text(CompactString)`, `Bytes(Arc<[u8]>)` 等で表現。
+  - `Null`, `Bool(bool)`, `Int(i64)`, `Float(f64)`, `Decimal(CompactString)`, `Text(CompactString)`, `DateTime(CompactString)`, `Bytes(Arc<[u8]>)` で表現。
   - **Oracle `NUMBER` 精度保証**: 16 桁以上の数値 ID や金額が `f64` で丸められないよう、`Decimal(CompactString)` として厳密保持する。
+  - **Oracle `DATE` / `TIMESTAMP` 表示**: ISO 形式（`YYYY-MM-DD HH:MM:SS` 等）へ変換し、`DateTime(CompactString)` で保持する。
   - 24 バイト以下の短い文字列はインライン格納（`compact_str` クレート活用）し、大量セル取得時のヒープアロケーションを劇的に削減。
 - **グリッド差分モデル (`GridPatch` / `RowEditState`)**:
   - 元データ（`ResultSet`）はイミュータブルまたは共有参照とし、編集差分だけをスパースなマップ（`(row_idx, col_idx) -> CellValue`、追加行リスト、削除行セット）で管理。これにより 10 万行中 3 セル編集してもメモリ増加は数 KB に抑えられる。
@@ -102,9 +103,10 @@ graph TD
   - `DbSession`: クエリ実行（ストリーミング/チャンクフェッチ）、実行キャンセルハンドル、トランザクション制御（`commit` / `rollback`）、メタデータ取得（スキーマ一覧、オブジェクト一覧、カラム・インデックス・制約・トリガ・権限・**DDL 取得**）。
     - Oracle の DDL 取得は `DBMS_METADATA.GET_DDL` を優先し、権限不足エラー時はディクショナリビューから DDL を再構築するフォールバックを備える。SQLite は `sqlite_master` から取得。
 - **非同期実行ワーカー（UI 非ブロッキング）**:
-  - UI スレッドとは独立した専用ワーカースレッド（または軽量 `tokio` ランタイム）上で DB セッションを保持。
-  - 通信は `crossbeam-channel` 等の高速チャネルで `DbRequest` / `DbEvent` をやり取りし、イベント到着時のみ `egui::Context::request_repaint()` を呼ぶ。
-  - キャンセル要求時はドライバ固有の `cancel()`（Oracle の `OCI_Break` 相当等）を別スレッドから安全に発行。
+  - UI スレッドとは独立した専用ワーカースレッド上で DB セッションを保持。
+  - 通信は `crossbeam-channel` で `DbCommand` / `DbEvent` をやり取りし、イベント到着時のみ `egui::Context::request_repaint()` を呼ぶ。
+  - `DbEvent::QueryFinished` には `is_ddl: bool` を含め、DDL 実行成功時にサイドバー表示中であれば自動でオブジェクト一覧を再読込する。
+  - キャンセル要求時はドライバ固有のキャンセル手段（将来拡張）を別スレッドから発行可能にする。
 - **Oracle ドライバ戦略 (`ququ-db-oracle`) — Pure Rust 方式に確定**:
   - **`oracle-rs`** を採用し、Oracle Instant Client（OCI/ODPI-C DLL）への外部依存を完全に排除した単一バイナリ構成とする。
   - `tokio` ベースのネイティブ非同期通信により、UI スレッドを一切ブロックせず、高速起動・省メモリを実現する。
@@ -121,11 +123,13 @@ graph TD
   - 描画ループ内での `String` ヒープ確保を徹底排除（スタックバッファやキャッシュ済み文字列スライスを利用）。
   - セル選択・範囲選択・キーボードナビゲーション・インライン編集・差分色分けをネイティブ実装。
 - **オブジェクトブラウザ＆詳細ペイン**:
-  - メタデータはスキーマ単位でキャッシュし、フィルタ入力時はキャッシュに対して即座に絞り込み（DB への無駄な再問い合わせを防止）。
+  - 各ペインの `egui::UiBuilder` に固有の `id_salt` を付与して内部 `TableBuilder` 間のウィジェット ID 衝突を防止。
+  - ホバー時は指アイコン（`PointingHand`）を表示し、右クリックメニューから `DDL 取得` および `全項目 SELECT 文挿入` を実行できる。
 
 ### 3.5 `ququ-app`
 - `eframe`（描画バックエンド: **`glow` / OpenGL**）による軽量・高速ネイティブウィンドウ起動とイベントループ管理。
 - **1 ウィンドウ ＝ 1 DB セッション** モデルにより、全タブ間で接続・トランザクション状態を一貫管理。
+- バージョン情報はソースへハードコーディングせず、`env!("CARGO_PKG_VERSION")`（ルート `Cargo.toml` 継承）を動的に参照して UI へ渡す。
 - グローバルアロケータに **`mimalloc`** を採用し、GUI 描画や大量結果セット処理時のアロケーション遅延・メモリ断片化を抑制。
 - ウィンドウサイズ・ペイン分割比率・開いていたタブ・接続履歴の高速な保存と復元。
 

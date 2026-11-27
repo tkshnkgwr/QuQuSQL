@@ -1,17 +1,26 @@
+//! Oracle の `tnsnames.ora` を軽量パース・探索するモジュール。
+
 use regex::Regex;
 use std::path::PathBuf;
 
+/// `tnsnames.ora` から抽出した 1 エントリ分の接続先情報。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TnsEntry {
+    /// TNS 接続エイリアス名
     pub alias: String,
+    /// ホスト名または IP アドレス
     pub host: String,
+    /// ポート番号
     pub port: u16,
+    /// サービス名（定義されている場合）
     pub service_name: Option<String>,
+    /// レガシー SID（定義されている場合）
     pub sid: Option<String>,
 }
 
 /// `tnsnames.ora` を軽量パースし、各エントリから接続に必要な情報を抽出する。
 pub fn parse_tnsnames(content: &str) -> Vec<TnsEntry> {
+    // 行頭の `#` コメント行を除去する
     let cleaned: String = content
         .lines()
         .map(|line| {
@@ -26,7 +35,7 @@ pub fn parse_tnsnames(content: &str) -> Vec<TnsEntry> {
     let mut i = 0;
 
     while i < chars.len() {
-        // エイリアス名を探す（行頭・空白後の `ALIAS = (` パターン）
+        // 先頭の空白をスキップしてエイリアス名を読み取る
         while i < chars.len() && chars[i].is_whitespace() {
             i += 1;
         }
@@ -40,12 +49,12 @@ pub fn parse_tnsnames(content: &str) -> Vec<TnsEntry> {
         }
         let alias: String = chars[name_start..i].iter().collect();
 
-        // '=' までスキップ
+        // '=' まで空白を読み飛ばす
         while i < chars.len() && chars[i].is_whitespace() {
             i += 1;
         }
         if i >= chars.len() || chars[i] != '=' {
-            // パース不能行は改行まで読み飛ばす
+            // 定義形式でない行は改行まで読み飛ばす
             while i < chars.len() && chars[i] != '\n' {
                 i += 1;
             }
@@ -60,7 +69,7 @@ pub fn parse_tnsnames(content: &str) -> Vec<TnsEntry> {
             continue;
         }
 
-        // 対応する括弧ブロック終端までを取得
+        // 括弧の対応深度を追跡して 1 エントリ分のブロック終端まで抽出する
         let block_start = i;
         let mut depth = 0usize;
         while i < chars.len() {
@@ -87,6 +96,7 @@ pub fn parse_tnsnames(content: &str) -> Vec<TnsEntry> {
     entries
 }
 
+/// 括弧ブロック文字列から `HOST`・`PORT`・`SERVICE_NAME`・`SID` を正規表現で取り出す。
 fn extract_tns_entry(alias: &str, block: &str) -> Option<TnsEntry> {
     let re_host = Regex::new(r"(?i)HOST\s*=\s*([^)\s]+)").ok()?;
     let re_port = Regex::new(r"(?i)PORT\s*=\s*(\d+)").ok()?;
@@ -122,7 +132,7 @@ fn extract_tns_entry(alias: &str, block: &str) -> Option<TnsEntry> {
     })
 }
 
-/// 指定パスまたは `TNS_ADMIN` 環境変数から `tnsnames.ora` を探索する。
+/// 指定パス、環境変数 `TNS_ADMIN`、`ORACLE_HOME` の順で `tnsnames.ora` を探索する。
 pub fn find_tnsnames_path(override_dir_or_file: Option<&str>) -> Option<PathBuf> {
     let mut candidates = Vec::new();
 

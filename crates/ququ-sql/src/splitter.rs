@@ -1,13 +1,18 @@
+//! セミコロン `;` 区切りでの SQL 文分割およびカーソル位置の 1 文抽出モジュール。
+
 use crate::lexer::{TokenKind, tokenize};
 use std::ops::Range;
 
+/// 分割された 1 つの SQL 文と元テキスト内のバイト範囲。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SqlStatement<'a> {
+    /// 先頭・末尾の空白をトリムした SQL 文文字列
     pub sql: &'a str,
+    /// 元テキスト内のバイトオフセット範囲
     pub range: Range<usize>,
 }
 
-/// セミコロン `;` 区切りで SQL 文を分割する（文字列・コメント内の `;` は無視）。
+/// セミコロン `;` 区切りで SQL 文を分割する（文字列リテラル・コメント内の `;` は無視）。
 pub fn split_statements(sql: &str) -> Vec<SqlStatement<'_>> {
     let tokens = tokenize(sql);
     let mut statements = Vec::new();
@@ -32,6 +37,7 @@ pub fn split_statements(sql: &str) -> Vec<SqlStatement<'_>> {
             continue;
         }
 
+        // 先頭の空白・コメントは文の開始位置に含めずスキップする
         if !matches!(token.kind, TokenKind::Whitespace | TokenKind::Comment) {
             if stmt_start.is_none() {
                 stmt_start = Some(token.range.start);
@@ -40,6 +46,7 @@ pub fn split_statements(sql: &str) -> Vec<SqlStatement<'_>> {
         }
     }
 
+    // 末尾にセミコロンがない最終文を回収する
     if let Some(start) = stmt_start {
         let end = last_non_ws_end.max(start);
         let slice = sql[start..end].trim();
@@ -55,6 +62,7 @@ pub fn split_statements(sql: &str) -> Vec<SqlStatement<'_>> {
 }
 
 /// カーソル位置（バイトオフセット）を含む 1 文を返す。
+///
 /// セミコロンの直後や文末の空白にカーソルがある場合は直前の文を優先する。
 pub fn statement_at_offset(sql: &str, byte_offset: usize) -> Option<SqlStatement<'_>> {
     let statements = split_statements(sql);
@@ -70,7 +78,7 @@ pub fn statement_at_offset(sql: &str, byte_offset: usize) -> Option<SqlStatement
         return Some(found.clone());
     }
 
-    // 文と文の間の空白にいる場合、直前の文、なければ直後の文を返す
+    // 文と文の間の空白にいる場合は直前の文、なければ先頭文を返す
     statements
         .iter()
         .rfind(|s| s.range.end < clamped)
@@ -78,6 +86,7 @@ pub fn statement_at_offset(sql: &str, byte_offset: usize) -> Option<SqlStatement
         .cloned()
 }
 
+/// 文字列がコメントと空白のみで構成されているかを判定する。
 fn is_only_comments(slice: &str) -> bool {
     tokenize(slice)
         .into_iter()
@@ -113,5 +122,21 @@ UPDATE emp SET name = 'x;y' WHERE id = 1;
         let first_end = sql.find(';').unwrap() + 1;
         let stmt1 = statement_at_offset(sql, first_end).unwrap();
         assert_eq!(stmt1.sql, "SELECT 1 FROM dual");
+    }
+
+    #[test]
+    fn handles_trailing_without_semicolon_and_comment_only() {
+        assert!(split_statements("  -- comment\n  /* only comment */ ").is_empty());
+
+        let sql = "SELECT 1 FROM dual;\n  SELECT 2 FROM dual";
+        let stmts = split_statements(sql);
+        assert_eq!(stmts.len(), 2);
+        assert_eq!(stmts[1].sql, "SELECT 2 FROM dual");
+
+        let between = sql.find('\n').unwrap() + 1;
+        assert_eq!(
+            statement_at_offset(sql, between).unwrap().sql,
+            "SELECT 1 FROM dual"
+        );
     }
 }

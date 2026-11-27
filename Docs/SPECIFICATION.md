@@ -113,11 +113,12 @@ QuQuSQL の対応 RDBMS は **Oracle Database** と **SQLite** とします（�
 
 ### 4.5 オブジェクトブラウザ・DB 検索・テーブル仕様書出力・DDL 編集
 - **オブジェクト一覧（右上ペイン）**:
-  - `owner`（スキーマ）切替、`type`（TABLE / VIEW / SYNONYM / INDEX / SEQUENCE / PACKAGE / PROCEDURE / FUNCTION / TRIGGER 等）切替。
+  - `owner`（スキーマ）切替、`type`（TABLE / VIEW / SYNONYM / INDEX / SEQUENCE / TRIGGER 等）切替。
   - インクリメンタル `filter` ＋ `clear` ボタン。
-  - オブジェクト名と論理名（COMMENTS）の 2 列表示。
-  - **複数選択対応**（`Ctrl + クリック` / `Shift + クリック` / フィルタ結果全選択）。
-  - ダブルクリックまたは右クリックメニューで「エディタへ名前挿入」「SELECT 文生成」「グリッドで開く」「**DDL をエディタで編集**」「**テーブル仕様書を出力**」。
+  - オブジェクト名と論理名（COMMENTS）の 2 列表示（ホバー時は指アイコン表示）。
+  - `CREATE TABLE` 等の DDL 実行時、サイドバー表示中であれば自動でオブジェクト一覧を再取得して最新化。
+  - **複数選択対応**（`Ctrl + クリック` / `Shift + クリック` / フィルタ結果全選択 ※Phase 3）。
+  - ダブルクリックまたは右クリックメニューで「エディタへ名前挿入」「SELECT 文を挿入」「**SELECT 文を挿入 (全項目)**」「**DDL を取得（エディタへ貼り付け）**」「グリッドで開く」「**テーブル仕様書を出力**」。
 - **オブジェクト詳細（右下ペイン）**:
   - タブ切替：`Column` / `Index` / `Constraint` / `R_Constraint` / `Trigger` / `Privilege` / `DDL(Source)`。
   - `filter` ＋ `clear` ボタンによるカラム絞り込み。
@@ -216,7 +217,7 @@ QuQuSQL の対応 RDBMS は **Oracle Database** と **SQLite** とします（�
 
 | フェーズ | マイルストーン | 主な実装範囲 |
 | :--- | :--- | :--- |
-| **Phase 1: MVP（最優先）** | データ操作 SQL の確実な実行と基本編集 | マルチクレート骨格、2×2 画面レイアウト、Oracle (`oracle-rs`) & SQLite 接続、**データ操作 SQL（SELECT / INSERT / UPDATE / DELETE）実行・Commit/Rollback**、基本 SQL エディタ（行番号・ハイライト・タブ・**検索＆置換必須**）、実行ログ＆仮想スクロール結果グリッド、オブジェクトブラウザ（テーブル・カラム一覧＆フィルタ） |
+| **Phase 1: MVP（実装済み）** | データ操作 SQL の確実な実行と基本編集 | マルチクレート骨格、2×2 画面レイアウト、Oracle (`oracle-rs`) & SQLite 接続、**データ操作 SQL（SELECT / INSERT / UPDATE / DELETE）実行・Commit/Rollback**、**環境区分別ログイン＆本番常時警告バナー＆キャンセル固定安全確認**、基本 SQL エディタ（行番号・ハイライト・タブ・**検索＆置換**）、実行ログ＆仮想スクロール結果グリッド（さらに取得/TSV コピー）、オブジェクトブラウザ（一覧・カラム・フィルタ・**DDL 実行時自動更新**・**DDL 取得**・**全項目 SELECT 挿入**）、**ヘルプ→バージョン情報（`CARGO_PKG_VERSION` 動的参照）** |
 | **Phase 2: OSqlGrid コア** | 表形式データ直接編集の完成 | ROWID/PK ベース差分管理、セル直接編集・追加・削除、最小 UPDATE 生成＆SQL プレビュー、Commit/Rollback 連携、Excel 互換コピペ、CSV/TSV/SQL エクスポート、リアルタイム集計 |
 | **Phase 3: OSqlEdit 高度化** | 実務開発効率の最大化 | `ropey` 独自エディタ移行（矩形選択・ルーラー・空白/改行可視化）、文脈認識コード補完、実行計画（Explain Plan）、バインド変数、接続先カラーリング、SQL 整形、SQL ライブラリ、エンコーディング変換、**テーブル仕様書出力（Excel / Markdown）**、**オブジェクト DDL 編集** |
 | **Phase 4: 運用強化・拡張** | 高度運用機能の拡充 | DB 内 Grep、転置表示・単票編集ダイアログ、LOB 対応、チューニング・最適化（PL/SQL 支援・DB 監視ダッシュボードは将来検討） |

@@ -1,9 +1,12 @@
+//! 固定行高の仮想スクロールに対応した SELECT 結果グリッド描画モジュール。
+
 use crate::state::{AppAction, UiState};
 use crate::theme::AppTheme;
 use egui::{Align, RichText, Sense, Ui};
 use egui_extras::{Column, TableBuilder};
 use ququ_core::ResultSet;
 
+/// 左下ペインの結果グリッドおよび上部アクションバー（さらに取得・TSV コピー）を描画する。
 pub fn render_result_grid(
     ui: &mut Ui,
     state: &mut UiState,
@@ -20,7 +23,7 @@ pub fn render_result_grid(
         return;
     };
 
-    // グリッド上部バー（件数・時間・TSVコピー・追加取得）
+    // グリッド上部バー（件数・実行時間・追加フェッチ・TSV コピー）
     ui.horizontal(|ui| {
         let more_text = if rs.has_more { "（未取得あり）" } else { "" };
         ui.label(
@@ -34,22 +37,22 @@ pub fn render_result_grid(
             .strong(),
         );
 
-        if rs.has_more {
-            if let Some(src_sql) = rs.source_sql.clone() {
-                if ui.button("+ さらに 1,000 行").clicked() && !state.busy {
-                    actions.push(AppAction::FetchMore {
-                        sql: src_sql.clone(),
-                        offset: rs.row_count,
-                        limit: state.config.default_fetch_limit,
-                    });
-                }
-                if ui.button("全件取得").clicked() && !state.busy {
-                    actions.push(AppAction::FetchMore {
-                        sql: src_sql,
-                        offset: rs.row_count,
-                        limit: 0,
-                    });
-                }
+        if rs.has_more
+            && let Some(src_sql) = rs.source_sql.clone()
+        {
+            if ui.button("+ さらに 1,000 行").clicked() && !state.busy {
+                actions.push(AppAction::FetchMore {
+                    sql: src_sql.clone(),
+                    offset: rs.row_count,
+                    limit: state.config.default_fetch_limit,
+                });
+            }
+            if ui.button("全件取得").clicked() && !state.busy {
+                actions.push(AppAction::FetchMore {
+                    sql: src_sql,
+                    offset: rs.row_count,
+                    limit: 0,
+                });
             }
         }
 
@@ -73,6 +76,7 @@ pub fn render_result_grid(
     let col_count = rs.col_count();
 
     let mut table = TableBuilder::new(ui)
+        .id_salt("query_result_table")
         .striped(true)
         .resizable(true)
         .cell_layout(egui::Layout::left_to_right(Align::Center))
@@ -82,6 +86,7 @@ pub fn render_result_grid(
         table = table.column(Column::initial(130.0).at_least(50.0).clip(true));
     }
 
+    // フレーム内の不要な String 確保を抑えるため再利用可能なバッファを用意する
     let mut cell_buf = String::with_capacity(64);
     let mut clicked_cell: Option<(usize, usize)> = None;
     let mut copy_text: Option<String> = None;
@@ -164,6 +169,7 @@ pub fn render_result_grid(
     }
 }
 
+/// 結果セットを Excel 互換の TSV（タブ区切り＋必要時ダブルクォートエスケープ）文字列へ変換する。
 fn result_set_to_tsv(rs: &ResultSet, with_header: bool) -> String {
     let mut out = String::new();
     if with_header {
@@ -197,4 +203,34 @@ fn result_set_to_tsv(rs: &ResultSet, with_header: bool) -> String {
         out.push('\n');
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ququ_core::{CellValue, ColumnMeta};
+
+    #[test]
+    fn exports_tsv_with_excel_escaping_and_null_handling() {
+        let mut rs = ResultSet::with_columns(vec![
+            ColumnMeta {
+                name: "ID".into(),
+                data_type: "INT".into(),
+                nullable: false,
+            },
+            ColumnMeta {
+                name: "NOTE".into(),
+                data_type: "TEXT".into(),
+                nullable: true,
+            },
+        ]);
+        rs.push_row(vec![
+            CellValue::Int(1),
+            CellValue::Text("a\"b\nc".into()),
+        ]);
+        rs.push_row(vec![CellValue::Int(2), CellValue::Null]);
+
+        let tsv = result_set_to_tsv(&rs, true);
+        assert_eq!(tsv, "ID\tNOTE\n1\t\"a\"\"b\nc\"\n2\t\n");
+    }
 }

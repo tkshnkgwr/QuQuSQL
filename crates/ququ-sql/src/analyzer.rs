@@ -1,12 +1,21 @@
+//! SQL 文の種別判定および危険な DML（WHERE 句なし更新/削除）を検知するモジュール。
+
 use crate::lexer::{TokenKind, tokenize};
 
+/// SQL 文の操作種別。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StatementKind {
+    /// 参照系クエリ（SELECT / WITH / SHOW / PRAGMA / EXPLAIN 等）
     Query,
+    /// データ操作文（INSERT / UPDATE / DELETE / MERGE / ROLLBACK TO）
     Dml,
+    /// データ定義文（CREATE / ALTER / DROP / TRUNCATE / GRANT 等）
     Ddl,
+    /// 明示的トランザクション確定（COMMIT）
     Commit,
+    /// 明示的トランザクション取消（ROLLBACK）
     Rollback,
+    /// その他種別
     Other,
 }
 
@@ -31,10 +40,11 @@ pub fn analyze_statement(sql: &str) -> StatementKind {
         }
         "COMMIT" => StatementKind::Commit,
         "ROLLBACK" => {
-            if let Some(next) = significant.next() {
-                if sql[next.range.clone()].eq_ignore_ascii_case("TO") {
-                    return StatementKind::Dml;
-                }
+            // `ROLLBACK TO SAVEPOINT ...` は部分ロールバックのため DML 相当として扱う
+            if let Some(next) = significant.next()
+                && sql[next.range.clone()].eq_ignore_ascii_case("TO")
+            {
+                return StatementKind::Dml;
             }
             StatementKind::Rollback
         }
@@ -62,6 +72,7 @@ pub fn is_dml_without_where(sql: &str) -> bool {
             depth = depth.saturating_sub(1);
             continue;
         }
+        // サブクエリ内の WHERE に誤認しないよう、括弧深度 0 の WHERE のみを検査する
         if depth == 0 && token.kind == TokenKind::Keyword {
             let upper = text.to_ascii_uppercase();
             if first_kw.is_none() {
@@ -99,6 +110,22 @@ mod tests {
         assert_eq!(
             analyze_statement("ROLLBACK TO SAVEPOINT sp1"),
             StatementKind::Dml
+        );
+        assert_eq!(
+            analyze_statement("WITH cte AS (SELECT 1 FROM dual) SELECT * FROM cte"),
+            StatementKind::Query
+        );
+        assert_eq!(
+            analyze_statement("MERGE INTO a USING b ON (a.id = b.id) WHEN MATCHED THEN UPDATE SET a.x = 1"),
+            StatementKind::Dml
+        );
+        assert_eq!(
+            analyze_statement("TRUNCATE TABLE temp_log"),
+            StatementKind::Ddl
+        );
+        assert_eq!(
+            analyze_statement("ALTER TABLE users ADD age NUMBER"),
+            StatementKind::Ddl
         );
     }
 

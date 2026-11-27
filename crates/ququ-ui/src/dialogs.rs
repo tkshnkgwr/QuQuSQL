@@ -1,8 +1,11 @@
+//! 接続・ログインダイアログ、安全確認モーダル、およびバージョン情報ダイアログの描画モジュール。
+
 use crate::state::{AppAction, ConfirmAction, ConfirmModal, UiState};
 use crate::theme::{AppTheme, env_color};
 use egui::{Align, Color32, RichText, Stroke, Ui};
 use ququ_core::{ConnectCredentials, ConnectionProfile, DbType, EnvironmentTier, OracleConnectMode};
 
+/// 接続・ログインおよび接続プロファイル管理ダイアログを描画する。
 pub fn render_login_dialog(
     ctx: &egui::Context,
     state: &mut UiState,
@@ -22,10 +25,10 @@ pub fn render_login_dialog(
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
         .show(ctx, |ui| {
             ui.columns(2, |cols| {
-                // 左列：環境区分ごとの接続一覧（誤接続防止セクション分離）
+                // 左列：環境区分ごとの接続一覧（誤接続防止のため本番環境は赤枠分離）
                 render_profile_list_column(&mut cols[0], state);
 
-                // 右列：ログイン／プロファイル編集
+                // 右列：ログイン／プロファイル編集フォーム
                 render_profile_detail_column(&mut cols[1], state, actions);
             });
         });
@@ -36,6 +39,7 @@ pub fn render_login_dialog(
     }
 }
 
+/// 左列：環境区分ごとに整理された接続プロファイル一覧を描画する。
 fn render_profile_list_column(ui: &mut Ui, state: &mut UiState) {
     ui.horizontal(|ui| {
         ui.heading("接続先一覧");
@@ -63,7 +67,7 @@ fn render_profile_list_column(ui: &mut Ui, state: &mut UiState) {
                 render_tier_group(ui, state, tier);
             }
 
-            // 本番環境は赤枠で物理的に分離し、不用意なクリックを防止
+            // 本番環境は赤枠で物理的に分離し、不用意なクリックを防止する
             ui.add_space(6.0);
             let prod_color = env_color(EnvironmentTier::Production);
             egui::Frame::NONE
@@ -102,6 +106,7 @@ fn render_profile_list_column(ui: &mut Ui, state: &mut UiState) {
         });
 }
 
+/// 指定された環境区分に属する接続プロファイル一覧を描画する。
 fn render_tier_group(ui: &mut Ui, state: &mut UiState, tier: EnvironmentTier) {
     let items: Vec<ConnectionProfile> = state
         .profiles
@@ -121,7 +126,12 @@ fn render_tier_group(ui: &mut Ui, state: &mut UiState, tier: EnvironmentTier) {
             .corner_radius(3.0)
             .inner_margin(egui::Margin::symmetric(5, 1))
             .show(ui, |ui| {
-                ui.label(RichText::new(tier.label()).small().strong().color(Color32::WHITE));
+                ui.label(
+                    RichText::new(tier.label())
+                        .small()
+                        .strong()
+                        .color(Color32::WHITE),
+                );
             });
         ui.label(RichText::new(format!("({}件)", items.len())).small().color(Color32::GRAY));
     });
@@ -131,6 +141,7 @@ fn render_tier_group(ui: &mut Ui, state: &mut UiState, tier: EnvironmentTier) {
     }
 }
 
+/// 接続プロファイル一覧の 1 行を描画する。
 fn render_profile_row(ui: &mut Ui, state: &mut UiState, prof: &ConnectionProfile) {
     let selected = state.login_dialog.selected_profile_id.as_deref() == Some(&prof.id);
     let color = env_color(prof.env);
@@ -152,6 +163,7 @@ fn render_profile_row(ui: &mut Ui, state: &mut UiState, prof: &ConnectionProfile
     });
 }
 
+/// 右列：選択中プロファイルの接続実行画面（または編集フォーム）を描画する。
 fn render_profile_detail_column(
     ui: &mut Ui,
     state: &mut UiState,
@@ -253,7 +265,9 @@ fn render_profile_detail_column(
 
     ui.horizontal(|ui| {
         let btn_text = if prof.env.is_production() {
-            RichText::new("⚠ 本番環境へ接続").color(Color32::WHITE).strong()
+            RichText::new("⚠ 本番環境へ接続")
+                .color(Color32::WHITE)
+                .strong()
         } else {
             RichText::new("接続").color(Color32::WHITE).strong()
         };
@@ -276,11 +290,8 @@ fn render_profile_detail_column(
     });
 }
 
-fn trigger_connect(
-    state: &mut UiState,
-    prof: &ConnectionProfile,
-    actions: &mut Vec<AppAction>,
-) {
+/// 接続要求アクションを発行し、入力中パスワードをムーブ後に消去する。
+fn trigger_connect(state: &mut UiState, prof: &ConnectionProfile, actions: &mut Vec<AppAction>) {
     let pw = if prof.db_type == DbType::Oracle {
         Some(std::mem::take(&mut state.login_dialog.password_input))
     } else {
@@ -299,11 +310,8 @@ fn trigger_connect(
     state.login_dialog.error_msg = None;
 }
 
-fn render_profile_editor(
-    ui: &mut Ui,
-    state: &mut UiState,
-    actions: &mut Vec<AppAction>,
-) {
+/// 接続プロファイルの新規作成・編集フォームを描画する。
+fn render_profile_editor(ui: &mut Ui, state: &mut UiState, actions: &mut Vec<AppAction>) {
     let Some(mut edit) = state.login_dialog.editing_profile.take() else {
         return;
     };
@@ -336,6 +344,7 @@ fn render_profile_editor(
                                 ui.selectable_value(&mut edit.env, env, env.badge_text());
                             }
                         });
+                    // 環境区分を切り替えた場合は安全プリセットを自動反映する
                     if edit.env != prev_env {
                         edit.apply_env_presets(edit.env);
                     }
@@ -359,13 +368,12 @@ fn render_profile_editor(
                                         .desired_width(170.0)
                                         .hint_text(":memory: または .db パス"),
                                 );
-                                if ui.button("参照...").clicked() {
-                                    if let Some(path) = rfd::FileDialog::new()
+                                if ui.button("参照...").clicked()
+                                    && let Some(path) = rfd::FileDialog::new()
                                         .add_filter("SQLite DB", &["db", "sqlite", "sqlite3"])
                                         .pick_file()
-                                    {
-                                        edit.file_path = path.display().to_string();
-                                    }
+                                {
+                                    edit.file_path = path.display().to_string();
                                 }
                             });
                             ui.end_row();
@@ -394,10 +402,10 @@ fn render_profile_editor(
 
                                     ui.label("ポート:");
                                     let mut port_str = edit.port.to_string();
-                                    if ui.text_edit_singleline(&mut port_str).changed() {
-                                        if let Ok(p) = port_str.trim().parse::<u16>() {
-                                            edit.port = p;
-                                        }
+                                    if ui.text_edit_singleline(&mut port_str).changed()
+                                        && let Ok(p) = port_str.trim().parse::<u16>()
+                                    {
+                                        edit.port = p;
                                     }
                                     ui.end_row();
 
@@ -457,7 +465,9 @@ fn render_profile_editor(
     }
 }
 
-/// 安全確認モーダル。誤って Enter キーを連打しても確定されないよう、
+/// 安全確認モーダルを描画する。
+///
+/// 誤って Enter キーを連打しても確定されないよう、
 /// キャンセルボタンをデフォルトフォーカス（かつ Esc で閉じる）に固定する。
 pub fn render_confirm_modal(
     ctx: &egui::Context,
@@ -482,10 +492,7 @@ pub fn render_confirm_modal(
         .resizable(false)
         .default_width(460.0)
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-        .frame(
-            egui::Frame::window(&ctx.style())
-                .stroke(Stroke::new(2.0_f32, accent)),
-        )
+        .frame(egui::Frame::window(&ctx.style()).stroke(Stroke::new(2.0_f32, accent)))
         .show(ctx, |ui| {
             ui.label(RichText::new(&modal.message).strong());
 
@@ -506,7 +513,7 @@ pub fn render_confirm_modal(
 
             ui.add_space(10.0);
             ui.horizontal(|ui| {
-                // キャンセルを先頭・デフォルトフォーカスに固定
+                // キャンセルボタンを先頭かつデフォルトフォーカスに固定して誤爆を防止する
                 let cancel_btn = ui.button("キャンセル (安全)");
                 if cancel_btn.clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                     close_modal = true;
@@ -538,6 +545,7 @@ pub fn render_confirm_modal(
     }
 }
 
+/// 確認モーダル承認後のアクションを `AppAction` へ変換して発行する。
 fn execute_confirmed_action(
     state: &mut UiState,
     action: ConfirmAction,
@@ -561,6 +569,7 @@ fn execute_confirmed_action(
     }
 }
 
+/// 未コミット変更がある状態でのアプリ終了確認モーダルを開く。
 pub fn open_exit_confirm(state: &mut UiState) {
     state.confirm_modal = Some(ConfirmModal {
         title: "未コミットの変更があります".to_string(),
@@ -575,4 +584,54 @@ pub fn open_exit_confirm(state: &mut UiState) {
             uncommitted_count: state.uncommitted_count,
         },
     });
+}
+
+/// ヘルプメニューから開くバージョン情報ダイアログを描画する。
+///
+/// バージョン番号はソースにハードコーディングせず、`Cargo.toml` 由来の `state.app_version` を表示する。
+pub fn render_version_dialog(ctx: &egui::Context, state: &mut UiState) {
+    if !state.show_version_dialog {
+        return;
+    }
+
+    let mut open = state.show_version_dialog;
+    egui::Window::new("バージョン情報")
+        .open(&mut open)
+        .collapsible(false)
+        .resizable(false)
+        .default_width(380.0)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .show(ctx, |ui| {
+            ui.heading("QuQuSQL");
+            ui.label(RichText::new("Quick Query SQL Tools").small().color(Color32::GRAY));
+            ui.separator();
+
+            egui::Grid::new("version_info_grid")
+                .num_columns(2)
+                .spacing([12.0, 6.0])
+                .show(ui, |ui| {
+                    ui.label("バージョン:");
+                    ui.label(RichText::new(format!("v{}", state.app_version)).strong());
+                    ui.end_row();
+
+                    ui.label("対応 RDBMS:");
+                    ui.label("Oracle Database (Pure Rust) / SQLite");
+                    ui.end_row();
+
+                    ui.label("UI エンジン:");
+                    ui.label("Rust + egui / eframe (glow)");
+                    ui.end_row();
+                });
+
+            ui.add_space(10.0);
+            ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                if ui.button("閉じる").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    state.show_version_dialog = false;
+                }
+            });
+        });
+
+    if !open {
+        state.show_version_dialog = false;
+    }
 }

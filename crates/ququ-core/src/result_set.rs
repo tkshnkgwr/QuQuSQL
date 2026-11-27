@@ -1,25 +1,38 @@
+//! SQL 実行結果セットおよび実行ログの型定義モジュール。
+
 use crate::CellValue;
 use compact_str::CompactString;
 
+/// 結果セットの列メタデータ。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ColumnMeta {
+    /// 列名
     pub name: CompactString,
+    /// DB 上のデータ型名
     pub data_type: CompactString,
+    /// NULL 許可フラグ
     pub nullable: bool,
 }
 
 /// 1 次元フラット配列でセルを保持する省メモリ結果セット。
 #[derive(Debug, Clone)]
 pub struct ResultSet {
+    /// 列メタデータ一覧
     pub columns: Vec<ColumnMeta>,
+    /// 行優先の 1 次元配列（`row * col_count + col` で参照）
     pub cells: Vec<CellValue>,
+    /// 現在の保持行数
     pub row_count: usize,
+    /// フェッチ上限により未取得の後続行が残っているか
     pub has_more: bool,
+    /// クエリ実行およびフェッチにかかった累計時間（ミリ秒）
     pub elapsed_ms: u64,
+    /// 追加フェッチ用に保持する元の SELECT 文
     pub source_sql: Option<String>,
 }
 
 impl ResultSet {
+    /// 空の結果セットを生成する。
     pub fn empty(elapsed_ms: u64) -> Self {
         Self {
             columns: Vec::new(),
@@ -31,6 +44,7 @@ impl ResultSet {
         }
     }
 
+    /// 列メタデータのみを指定して空の結果セットを初期化する。
     pub fn with_columns(columns: Vec<ColumnMeta>) -> Self {
         Self {
             columns,
@@ -42,10 +56,12 @@ impl ResultSet {
         }
     }
 
+    /// 列数を返す。
     pub fn col_count(&self) -> usize {
         self.columns.len()
     }
 
+    /// 指定行・指定列のセル参照を返す。範囲外の場合は `None`。
     pub fn get(&self, row: usize, col: usize) -> Option<&CellValue> {
         let cols = self.columns.len();
         if row >= self.row_count || col >= cols {
@@ -54,6 +70,7 @@ impl ResultSet {
         self.cells.get(row * cols + col)
     }
 
+    /// 1 行分のセル配列を末尾へ追加する（列数が不足する場合は NULL 埋めする）。
     pub fn push_row(&mut self, mut row: Vec<CellValue>) {
         let cols = self.columns.len();
         if row.len() < cols {
@@ -65,7 +82,7 @@ impl ResultSet {
         self.row_count += 1;
     }
 
-    /// 追加フェッチした行を結合する。
+    /// 追加フェッチした行を既存の結果セット末尾へ結合する。
     pub fn append(&mut self, more: ResultSet) {
         if self.columns.is_empty() {
             *self = more;
@@ -81,19 +98,39 @@ impl ResultSet {
     }
 }
 
+/// SQL 実行結果の種別。
 #[derive(Debug, Clone)]
 pub enum QueryOutcome {
+    /// SELECT 等で行セットを返した場合
     Rows(ResultSet),
-    Affected { rows: u64, elapsed_ms: u64 },
-    Message { text: String, elapsed_ms: u64 },
+    /// DML（INSERT / UPDATE / DELETE 等）で影響行数を返した場合
+    Affected {
+        /// 変更・削除・挿入された行数
+        rows: u64,
+        /// 実行時間（ミリ秒）
+        elapsed_ms: u64,
+    },
+    /// DDL や COMMIT / ROLLBACK 等の完了メッセージ
+    Message {
+        /// 完了メッセージ本文
+        text: String,
+        /// 実行時間（ミリ秒）
+        elapsed_ms: u64,
+    },
 }
 
+/// ログペインに表示する 1 回分の実行履歴エントリ。
 #[derive(Debug, Clone)]
 pub struct QueryLogEntry {
+    /// 実行時刻文字列
     pub timestamp: String,
+    /// 実行した SQL または操作コンテキスト
     pub sql: String,
+    /// 処理件数やエラー内容のサマリ
     pub summary: String,
+    /// エラー発生エントリかどうか
     pub is_error: bool,
+    /// 実行時間（ミリ秒）
     pub elapsed_ms: Option<u64>,
 }
 
