@@ -71,6 +71,26 @@ pub enum DbCommand {
         /// オブジェクト名
         name: String,
     },
+    /// OSqlGrid 直接編集向けにテーブルデータと ROWID を読み込む
+    LoadTableForEdit {
+        /// スキーマ名
+        owner: String,
+        /// テーブル名
+        table_name: String,
+        /// WHERE 句
+        where_clause: String,
+        /// ORDER BY 句
+        order_by: String,
+        /// 取得上限件数（0 で全件）
+        fetch_limit: usize,
+    },
+    /// OSqlGrid で編集した差分 DML を SAVEPOINT 保護下で適用する
+    ApplyGridDml {
+        /// 適用するパラメータ化 DML 群
+        dmls: Vec<ququ_core::ParameterizedDml>,
+        /// 書き込み許可フラグ（読み取り専用セッション時は `false`）
+        allow_write: bool,
+    },
     /// ワーカースレッドを終了する
     Shutdown,
 }
@@ -135,6 +155,22 @@ pub enum DbEvent {
         name: String,
         /// 取得した DDL 文字列
         ddl: String,
+    },
+    /// OSqlGrid 編集対象テーブルの読み込み完了
+    EditableTableLoaded {
+        /// 読み込んだテーブルデータと行キー
+        table: ququ_core::EditableTableData,
+    },
+    /// OSqlGrid 変更差分の DB 反映完了
+    GridApplyFinished {
+        /// DB に反映された合計行数
+        applied_rows: usize,
+        /// 実行した DML 文数
+        statement_count: usize,
+        /// 未コミット変更が残っているか
+        has_uncommitted: bool,
+        /// 未コミット操作件数
+        uncommitted_count: usize,
     },
     /// DB 操作中のエラー通知
     Error {
@@ -478,6 +514,76 @@ fn worker_loop(
                     ),
                 }
             }
+            DbCommand::LoadTableForEdit {
+                owner,
+                table_name,
+                where_clause,
+                order_by,
+                fetch_limit,
+            } => {
+                let Some(sess) = session.as_mut() else {
+                    continue;
+                };
+                match sess.load_table_for_edit(
+                    &owner,
+                    &table_name,
+                    &where_clause,
+                    &order_by,
+                    fetch_limit,
+                ) {
+                    Ok(table) => send_event(
+                        &event_tx,
+                        repaint.as_ref(),
+                        DbEvent::EditableTableLoaded { table },
+                    ),
+                    Err(e) => send_event(
+                        &event_tx,
+                        repaint.as_ref(),
+                        DbEvent::Error {
+                            context: "テーブル読込".to_string(),
+                            message: format!("{e:#}"),
+                        },
+                    ),
+                }
+            }
+            DbCommand::ApplyGridDml { dmls, allow_write } => {
+                if !allow_write {
+                    send_event(
+                        &event_tx,
+                        repaint.as_ref(),
+                        DbEvent::Error {
+                            context: "グリッド反映".to_string(),
+                            message: "読み取り専用セッションのため、データの変更適用はブロックされました。"
+                                .to_string(),
+                        },
+                    );
+                    continue;
+                }
+                let Some(sess) = session.as_mut() else {
+                    continue;
+                };
+                let statement_count = dmls.len();
+                match sess.apply_dml_batch(&dmls) {
+                    Ok(applied_rows) => send_event(
+                        &event_tx,
+                        repaint.as_ref(),
+                        DbEvent::GridApplyFinished {
+                            applied_rows,
+                            statement_count,
+                            has_uncommitted: sess.has_uncommitted_changes(),
+                            uncommitted_count: sess.uncommitted_count(),
+                        },
+                    ),
+                    Err(e) => send_event(
+                        &event_tx,
+                        repaint.as_ref(),
+                        DbEvent::Error {
+                            context: "グリッド反映".to_string(),
+                            message: format!("{e:#}"),
+                        },
+                    ),
+                }
+            }
         }
     }
 }
@@ -546,6 +652,29 @@ mod tests {
         }
         fn get_ddl(&mut self, owner: &str, _object_type: &ObjectType, name: &str) -> anyhow::Result<String> {
             Ok(format!("CREATE TABLE {owner}.{name} (ID NUMBER)"))
+        }
+        fn load_table_for_edit(
+            &mut self,
+            owner: &str,
+            table_name: &str,
+            where_clause: &str,
+            order_by: &str,
+            _fetch_limit: usize,
+        ) -> anyhow::Result<ququ_core::EditableTableData> {
+            Ok(ququ_core::EditableTableData {
+                dialect: ququ_core::SqlDialect::Sqlite,
+                owner: owner.to_string(),
+                table_name: table_name.to_string(),
+                where_clause: where_clause.to_string(),
+                order_by: order_by.to_string(),
+                columns: Vec::new(),
+                row_keys: Vec::new(),
+                result: ResultSet::empty(0),
+            })
+        }
+        fn apply_dml_batch(&mut self, dmls: &[ququ_core::ParameterizedDml]) -> anyhow::Result<usize> {
+            self.uncommitted += dmls.len();
+            Ok(dmls.len())
         }
         fn db_info(&self) -> String {
             "MockDB".to_string()
@@ -629,6 +758,44 @@ mod tests {
             DbEvent::DdlLoaded { name, ddl } => {
                 assert_eq!(name, "TEST_TBL");
                 assert!(ddl.contains("CREATE TABLE MOCK.TEST_TBL"));
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+
+        // ApplyGridDml は読み取り専用時にブロックされ、許可時に適用完了イベントを返す
+        let sample_dml = vec![ququ_core::ParameterizedDml {
+            sql: "UPDATE MOCK.TEST_TBL SET NAME = ?1 WHERE rowid = ?2".to_string(),
+            params: vec![ququ_core::CellValue::Text("A".into()), ququ_core::CellValue::Int(1)],
+            preview_sql: "UPDATE MOCK.TEST_TBL SET NAME = 'A' WHERE rowid = 1;".to_string(),
+            expect_one_row: true,
+        }];
+        worker.send(DbCommand::ApplyGridDml {
+            dmls: sample_dml.clone(),
+            allow_write: false,
+        });
+        match recv_event(&worker) {
+            DbEvent::Error { context, message } => {
+                assert_eq!(context, "グリッド反映");
+                assert!(message.contains("読み取り専用"));
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+
+        worker.send(DbCommand::ApplyGridDml {
+            dmls: sample_dml,
+            allow_write: true,
+        });
+        match recv_event(&worker) {
+            DbEvent::GridApplyFinished {
+                applied_rows,
+                statement_count,
+                has_uncommitted,
+                uncommitted_count,
+            } => {
+                assert_eq!(applied_rows, 1);
+                assert_eq!(statement_count, 1);
+                assert!(has_uncommitted);
+                assert_eq!(uncommitted_count, 1);
             }
             other => panic!("unexpected event: {other:?}"),
         }

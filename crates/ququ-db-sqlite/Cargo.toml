@@ -11,3 +11,6 @@ ququ-db.workspace = true
 rusqlite.workspace = true
 anyhow.workspace = true
 compact_str.workspace = true
+
+[dev-dependencies]
+ququ-sql.workspace = true

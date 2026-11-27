@@ -167,7 +167,7 @@ fn render_find_replace_bar(ui: &mut Ui, tab: &mut SqlTab, state: &mut FindReplac
                 }
 
                 ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
-                    if ui.button("✕").clicked() {
+                    if ui.button("×").clicked() {
                         state.open = false;
                         state.status_msg.clear();
                     }

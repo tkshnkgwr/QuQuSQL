@@ -291,6 +291,31 @@ pub fn render_main_ui(ctx: &egui::Context, state: &mut UiState, theme: &AppTheme
                             .small(),
                     );
                 }
+                if let Some(stats) = state.active_selection_stats() {
+                    ui.separator();
+                    let text = if stats.numeric_count > 0 {
+                        let avg = stats.avg.unwrap_or(0.0);
+                        let min = stats.min.unwrap_or(0.0);
+                        let max = stats.max.unwrap_or(0.0);
+                        format!(
+                            "選択: {}セル (非NULL:{}) | 数値:{} | 合計:{} | 平均:{} | 最小:{} | 最大:{}",
+                            stats.cell_count,
+                            stats.non_null_count,
+                            stats.numeric_count,
+                            format_stat_num(stats.sum),
+                            format_stat_num(avg),
+                            format_stat_num(min),
+                            format_stat_num(max),
+                        )
+                    } else {
+                        format!(
+                            "選択: {}セル (非NULL: {})",
+                            stats.cell_count, stats.non_null_count
+                        )
+                    };
+                    // 末尾の .0000 だけの整数見栄えを軽く調整する代わりにシンプルに表示
+                    ui.label(RichText::new(text).small().color(Color32::from_rgb(0, 102, 180)));
+                }
             });
         });
     });
@@ -380,37 +405,11 @@ fn render_left_area(
         egui::vec2(rect.width(), bottom_h),
     );
 
-    // 左上ペイン：タブバー＋SQL エディタ
+    // 左上ペイン：Zed 風タブバー（横移動ボタン・各タブ閉じるボタン）＋SQL エディタ
     ui.allocate_new_ui(
         egui::UiBuilder::new().id_salt("left_top_pane").max_rect(top_rect),
         |ui| {
-            ui.horizontal(|ui| {
-                let tab_count = state.tabs.len();
-                let mut switch_to = None;
-                let mut close_idx = None;
-                for (idx, tab) in state.tabs.iter().enumerate() {
-                    let label = if tab.dirty {
-                        format!("{} *", tab.title)
-                    } else {
-                        tab.title.clone()
-                    };
-                    if ui.selectable_label(state.active_tab == idx, label).clicked() {
-                        switch_to = Some(idx);
-                    }
-                    if tab_count > 1 && ui.small_button("×").clicked() {
-                        close_idx = Some(idx);
-                    }
-                }
-                if ui.small_button("+").clicked() {
-                    state.add_new_tab();
-                }
-                if let Some(i) = switch_to {
-                    state.active_tab = i;
-                }
-                if let Some(i) = close_idx {
-                    state.close_tab(i);
-                }
-            });
+            render_sql_tab_bar(ui, state, theme);
             ui.separator();
 
             let font_size = state.config.font_size;
@@ -463,37 +462,274 @@ fn render_left_area(
     );
 }
 
-/// 左下ペインの実行ログタブを描画する。
-fn render_log_pane(ui: &mut Ui, state: &UiState, theme: &AppTheme) {
+/// Zed 風の SQL タブバー（左右移動ボタン・横スクロール・各タブ閉じるボタン）を描画する。
+fn render_sql_tab_bar(ui: &mut Ui, state: &mut UiState, theme: &AppTheme) {
+    let tab_count = state.tabs.len();
+    let mut switch_to = None;
+    let mut close_idx = None;
+    let mut scroll_delta = 0.0_f32;
+    let mut add_tab = false;
+
+    let bar_bg = if theme.dark_mode {
+        Color32::from_rgb(36, 39, 46)
+    } else {
+        Color32::from_rgb(236, 238, 242)
+    };
+    let inactive_bg = if theme.dark_mode {
+        Color32::from_rgb(42, 46, 54)
+    } else {
+        Color32::from_rgb(228, 231, 236)
+    };
+    let border_color = theme.splitter_bg;
+    let accent_color = Color32::from_rgb(56, 132, 244);
+
+    egui::Frame::NONE
+        .fill(bar_bg)
+        .inner_margin(egui::Margin::symmetric(2, 2))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 2.0;
+
+                // Zed 風の左端横移動ボタン（← / →）
+                let nav_btn_size = egui::vec2(22.0, 24.0);
+                let left_btn = egui::Button::new(RichText::new("←").small())
+                    .min_size(nav_btn_size)
+                    .fill(inactive_bg);
+                if ui
+                    .add(left_btn)
+                    .on_hover_text("タブを左へスクロール")
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .clicked()
+                {
+                    scroll_delta -= 160.0;
+                }
+
+                let right_btn = egui::Button::new(RichText::new("→").small())
+                    .min_size(nav_btn_size)
+                    .fill(inactive_bg);
+                if ui
+                    .add(right_btn)
+                    .on_hover_text("タブを右へスクロール")
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .clicked()
+                {
+                    scroll_delta += 160.0;
+                }
+
+                // 右端の「+」ボタン分を除いた中央領域で横スクロールする
+                let scroll_width = (ui.available_width() - 28.0).max(40.0);
+                ui.allocate_ui(egui::vec2(scroll_width, 26.0), |ui| {
+                    let target_offset = (state.tab_scroll_offset + scroll_delta).max(0.0);
+                    let scroll_out = egui::ScrollArea::horizontal()
+                        .id_salt("sql_tab_bar_scroll")
+                        .scroll_bar_visibility(
+                            egui::scroll_area::ScrollBarVisibility::AlwaysHidden,
+                        )
+                        .scroll_offset(egui::vec2(target_offset, 0.0))
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = 2.0;
+                                for (idx, tab) in state.tabs.iter().enumerate() {
+                                    let is_active = state.active_tab == idx;
+                                    let bg = if is_active {
+                                        theme.editor_bg
+                                    } else {
+                                        inactive_bg
+                                    };
+                                    let title = if tab.dirty {
+                                        format!("{} *", tab.title)
+                                    } else {
+                                        tab.title.clone()
+                                    };
+
+                                    let frame_resp = egui::Frame::NONE
+                                        .fill(bg)
+                                        .stroke(egui::Stroke::new(1.0_f32, border_color))
+                                        .inner_margin(egui::Margin::symmetric(8, 3))
+                                        .show(ui, |ui| {
+                                            ui.horizontal(|ui| {
+                                                ui.spacing_mut().item_spacing.x = 6.0;
+                                                let text_color = if is_active {
+                                                    theme.identifier
+                                                } else {
+                                                    theme.null_fg
+                                                };
+                                                let lbl = ui
+                                                    .add(
+                                                        egui::Label::new(
+                                                            RichText::new(title)
+                                                                .small()
+                                                                .color(text_color),
+                                                        )
+                                                        .selectable(false)
+                                                        .sense(Sense::click()),
+                                                    )
+                                                    .on_hover_cursor(
+                                                        egui::CursorIcon::PointingHand,
+                                                    );
+                                                if lbl.clicked() {
+                                                    switch_to = Some(idx);
+                                                }
+
+                                                // Zed 風の各タブ閉じるボタン（×）
+                                                let close_btn = egui::Button::new(
+                                                    RichText::new("×").small().color(text_color),
+                                                )
+                                                .frame(false);
+                                                if ui
+                                                    .add_enabled(tab_count > 1, close_btn)
+                                                    .on_hover_text("タブを閉じる")
+                                                    .on_hover_cursor(
+                                                        egui::CursorIcon::PointingHand,
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    close_idx = Some(idx);
+                                                }
+                                            });
+                                        });
+
+                                    // アクティブタブの上辺にアクセントラインを描画する
+                                    if is_active {
+                                        let r = frame_resp.response.rect;
+                                        ui.painter().line_segment(
+                                            [
+                                                egui::pos2(r.left(), r.top() + 1.0),
+                                                egui::pos2(r.right(), r.top() + 1.0),
+                                            ],
+                                            egui::Stroke::new(2.0_f32, accent_color),
+                                        );
+                                    }
+                                }
+                            });
+                        });
+                    let max_scroll =
+                        (scroll_out.content_size.x - scroll_out.inner_rect.width()).max(0.0);
+                    state.tab_scroll_offset = scroll_out.state.offset.x.clamp(0.0, max_scroll);
+                });
+
+                if ui
+                    .add(
+                        egui::Button::new(RichText::new("+").small())
+                            .min_size(nav_btn_size)
+                            .fill(inactive_bg),
+                    )
+                    .on_hover_text("新しい SQL タブ")
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .clicked()
+                {
+                    add_tab = true;
+                }
+            });
+        });
+
+    if let Some(i) = switch_to {
+        state.active_tab = i;
+    }
+    if let Some(i) = close_idx {
+        state.close_tab(i);
+    }
+    if add_tab {
+        state.add_new_tab();
+        // 新規タブが見切れないよう右端方向へ少し寄せる
+        state.tab_scroll_offset += 200.0;
+    }
+}
+
+/// 左下ペインの実行ログタブを描画する（右クリックでログのコピー・クリアに対応）。
+fn render_log_pane(ui: &mut Ui, state: &mut UiState, theme: &AppTheme) {
+    let mut copy_logs = false;
+    let mut clear_logs = false;
+    let log_rect = ui.available_rect_before_wrap();
+
     egui::ScrollArea::both()
         .id_salt("query_log_scroll")
         .stick_to_bottom(true)
         .auto_shrink([false, false])
         .show(ui, |ui| {
-            for entry in &state.logs {
+            if state.logs.is_empty() {
                 ui.label(
-                    RichText::new(format!("-- {}", entry.timestamp))
-                        .monospace()
-                        .color(theme.log_timestamp),
-                );
-                ui.label(RichText::new(&entry.sql).monospace());
-                let summary_color = if entry.is_error {
-                    theme.log_error
-                } else {
-                    theme.identifier
-                };
-                ui.label(
-                    RichText::new(&entry.summary)
-                        .monospace()
-                        .color(summary_color),
-                );
-                ui.label(
-                    RichText::new("------------------------------------------------------------")
-                        .monospace()
+                    RichText::new("実行ログはまだありません。（右クリックでメニュー表示）")
+                        .small()
                         .color(theme.null_fg),
                 );
+            } else {
+                for entry in &state.logs {
+                    ui.label(
+                        RichText::new(format!("-- {}", entry.timestamp))
+                            .monospace()
+                            .color(theme.log_timestamp),
+                    );
+                    ui.label(RichText::new(&entry.sql).monospace());
+                    let summary_color = if entry.is_error {
+                        theme.log_error
+                    } else {
+                        theme.identifier
+                    };
+                    ui.label(
+                        RichText::new(&entry.summary)
+                            .monospace()
+                            .color(summary_color),
+                    );
+                    ui.label(
+                        RichText::new(
+                            "------------------------------------------------------------",
+                        )
+                        .monospace()
+                        .color(theme.null_fg),
+                    );
+                }
             }
         });
+
+    // ペイン全体（右側の余白を含む）のどこを右クリックしてもメニューを開く
+    let resp = ui.interact(
+        log_rect,
+        ui.id().with("log_pane_context_area"),
+        Sense::click(),
+    );
+    resp.context_menu(|ui| {
+        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+        if ui
+            .add_enabled(!state.logs.is_empty(), egui::Button::new("ログのコピー"))
+            .clicked()
+        {
+            copy_logs = true;
+            ui.close_menu();
+        }
+        if ui
+            .add_enabled(!state.logs.is_empty(), egui::Button::new("ログのクリア"))
+            .clicked()
+        {
+            clear_logs = true;
+            ui.close_menu();
+        }
+    });
+
+    if copy_logs {
+        let text = format_logs_text(&state.logs);
+        ui.ctx().copy_text(text);
+        state.status_notice = Some("実行ログをクリップボードへコピーしました。".to_string());
+    }
+    if clear_logs {
+        state.logs.clear();
+        state.status_notice = Some("実行ログをクリアしました。".to_string());
+    }
+}
+
+/// 実行ログ一覧をクリップボードコピー用のテキストへ整形する。
+fn format_logs_text(logs: &[ququ_core::QueryLogEntry]) -> String {
+    let mut out = String::new();
+    for entry in logs {
+        out.push_str(&format!("-- {}\n", entry.timestamp));
+        out.push_str(&entry.sql);
+        if !entry.sql.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push_str(&entry.summary);
+        out.push_str("\n------------------------------------------------------------\n");
+    }
+    out
 }
 
 /// 右側上下ペイン（上：オブジェクト一覧 / 下：カラム詳細）を描画する。
@@ -820,5 +1056,35 @@ fn save_active_tab(state: &mut UiState, force_dialog: bool) {
         tab.file_path = Some(path);
         tab.dirty = false;
         state.status_notice = Some("ファイルを保存しました。".to_string());
+    }
+}
+
+/// 選択統計の浮動小数点数を小数点以下最大 4 桁で整形し、末尾の冗長なゼロを省く。
+fn format_stat_num(v: f64) -> String {
+    if (v - v.round()).abs() < 1e-9 && v.abs() < 1e15 {
+        format!("{}", v.round() as i64)
+    } else {
+        let s = format!("{v:.4}");
+        s.trim_end_matches('0').trim_end_matches('.').to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn formats_logs_for_clipboard_copy() {
+        let logs = vec![ququ_core::QueryLogEntry {
+            timestamp: "2026/11/27 17:00:00".to_string(),
+            sql: "SELECT 1".to_string(),
+            summary: "1 件選択されました".to_string(),
+            is_error: false,
+            elapsed_ms: Some(1),
+        }];
+        let txt = format_logs_text(&logs);
+        assert!(txt.contains("-- 2026/11/27 17:00:00"));
+        assert!(txt.contains("SELECT 1"));
+        assert!(txt.contains("1 件選択されました"));
     }
 }

@@ -32,6 +32,17 @@ pub trait DbSession: Send {
     fn list_columns(&mut self, owner: &str, table_name: &str) -> Result<Vec<ColumnDetail>>;
     /// 指定オブジェクトの CREATE DDL 文を取得する。
     fn get_ddl(&mut self, owner: &str, object_type: &ObjectType, name: &str) -> Result<String>;
+    /// OSqlGrid 直接編集向けにテーブルデータと行識別キー（ROWID 等）を取得する。
+    fn load_table_for_edit(
+        &mut self,
+        owner: &str,
+        table_name: &str,
+        where_clause: &str,
+        order_by: &str,
+        fetch_limit: usize,
+    ) -> Result<ququ_core::EditableTableData>;
+    /// パラメータ化 DML バッチを SAVEPOINT 保護下で適用し、合計影響行数を返す（自動 COMMIT しない）。
+    fn apply_dml_batch(&mut self, dmls: &[ququ_core::ParameterizedDml]) -> Result<usize>;
     /// 接続先を表す表示用情報文字列を返す。
     fn db_info(&self) -> String;
 }

@@ -12,7 +12,7 @@ members = [
 default-members = ["crates/ququ-app"]
 
 [workspace.package]
-version = "0.0.3-alpha"
+version = "0.0.4-alpha"
 edition = "2024"
 authors = ["QuQuSQL developers"]
 license = "MIT OR Apache-2.0"

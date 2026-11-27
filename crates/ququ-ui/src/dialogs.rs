@@ -566,19 +566,50 @@ fn execute_confirmed_action(
         ConfirmAction::ExitWithUncommitted { .. } => {
             actions.push(AppAction::ConfirmExitClose);
         }
+        ConfirmAction::ApplyGridDml { dmls } => {
+            actions.push(AppAction::ApplyGridDml {
+                dmls,
+                allow_write: !state.read_only_session,
+            });
+        }
     }
 }
 
-/// 未コミット変更がある状態でのアプリ終了確認モーダルを開く。
+/// 未コミット変更または未保存 SQL タブがある状態でのアプリ終了確認モーダルを開く。
 pub fn open_exit_confirm(state: &mut UiState) {
-    state.confirm_modal = Some(ConfirmModal {
-        title: "未コミットの変更があります".to_string(),
-        message: format!(
-            "未コミットの変更が {} 件あります。\nコミットせずに終了すると変更はロールバック（破棄）されます。終了してもよろしいですか？",
+    let dirty_tabs = state.dirty_tab_titles();
+    let has_uncommitted = state.uncommitted_count > 0;
+    let has_dirty_tabs = !dirty_tabs.is_empty();
+
+    let title = match (has_uncommitted, has_dirty_tabs) {
+        (true, true) => "未コミット変更と未保存の SQL タブがあります",
+        (true, false) => "未コミットの変更があります",
+        (false, true) => "未保存の SQL タブがあります",
+        (false, false) => "終了確認",
+    }
+    .to_string();
+
+    let mut lines = Vec::new();
+    if has_uncommitted {
+        lines.push(format!(
+            "・未コミットの DB 変更が {} 件あります（終了するとロールバックされます）。",
             state.uncommitted_count
-        ),
+        ));
+    }
+    if has_dirty_tabs {
+        lines.push(format!(
+            "・未保存の SQL タブが {} 件あります: {}",
+            dirty_tabs.len(),
+            dirty_tabs.join(", ")
+        ));
+    }
+    lines.push("このまま保存・コミットせずに終了してもよろしいですか？".to_string());
+
+    state.confirm_modal = Some(ConfirmModal {
+        title,
+        message: lines.join("\n"),
         sql_preview: None,
-        is_danger: state.is_production(),
+        is_danger: state.is_production() || has_uncommitted,
         confirm_label: "破棄して終了".to_string(),
         action: ConfirmAction::ExitWithUncommitted {
             uncommitted_count: state.uncommitted_count,

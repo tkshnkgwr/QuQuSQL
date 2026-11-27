@@ -16,7 +16,7 @@ use ququ_db_oracle::OracleSession;
 use ququ_db_sqlite::SqliteSession;
 use ququ_ui::browser::format_full_select_sql;
 use ququ_ui::dialogs::open_exit_confirm;
-use ququ_ui::state::BottomTab;
+use ququ_ui::state::{BottomTab, GridEditorState};
 use ququ_ui::{AppAction, AppTheme, UiState, render_main_ui};
 use std::fs;
 use std::path::Path;
@@ -132,6 +132,7 @@ impl QuQuApp {
                     self.state.columns.clear();
                     self.state.selected_column_idx = None;
                     self.state.pending_select_insert_table = None;
+                    self.state.grid_editor = None;
                     self.state.status_notice = Some("切断しました。".to_string());
                     ctx.send_viewport_cmd(egui::ViewportCommand::Title(self.state.window_title()));
                 }
@@ -152,6 +153,8 @@ impl QuQuApp {
                             self.state.push_log(sql, msg.clone(), false, Some(rs.elapsed_ms));
                             self.state.result = Some(rs);
                             self.state.selected_cell = None;
+                            self.state.selection_anchor = None;
+                            self.state.grid_editor = None;
                             self.state.bottom_tab = BottomTab::Grid;
                             self.state.status_notice = Some(msg);
                         }
@@ -210,6 +213,23 @@ impl QuQuApp {
                         None,
                     );
                     self.state.status_notice = Some("ロールバック完了".to_string());
+                    // テーブル編集グリッドが開いていれば未反映変更を破棄し、ロールバック後の DB 状態を再読込する
+                    if let Some(ge) = self.state.grid_editor.as_mut() {
+                        ge.patch.clear();
+                        ge.editing_cell = None;
+                        let owner = ge.table.owner.clone();
+                        let table_name = ge.table.table_name.clone();
+                        let where_clause = ge.where_input.clone();
+                        let order_by = ge.order_input.clone();
+                        self.state.busy = true;
+                        self.worker.send(DbCommand::LoadTableForEdit {
+                            owner,
+                            table_name,
+                            where_clause,
+                            order_by,
+                            fetch_limit: self.state.config.default_fetch_limit,
+                        });
+                    }
                 }
                 DbEvent::OwnersLoaded(owners) => {
                     let default_owner = self
@@ -271,6 +291,51 @@ impl QuQuApp {
                     self.state.insert_into_active_editor(&snippet);
                     self.state.status_notice =
                         Some(format!("{name} の DDL をエディタへ貼り付けました。"));
+                }
+                DbEvent::EditableTableLoaded { table } => {
+                    let msg = format!(
+                        "テーブル読込: {}.{} ({} 件, {} ms)",
+                        table.owner, table.table_name, table.result.row_count, table.result.elapsed_ms
+                    );
+                    self.state.push_log(
+                        table.result.source_sql.clone().unwrap_or_default(),
+                        msg.clone(),
+                        false,
+                        Some(table.result.elapsed_ms),
+                    );
+                    self.state.grid_editor = Some(GridEditorState::from_table(table));
+                    self.state.bottom_tab = BottomTab::Grid;
+                    self.state.status_notice = Some(msg);
+                }
+                DbEvent::GridApplyFinished {
+                    applied_rows,
+                    statement_count,
+                    has_uncommitted: _,
+                    uncommitted_count,
+                } => {
+                    self.state.uncommitted_count = uncommitted_count;
+                    let msg = format!(
+                        "テーブル変更反映完了: {statement_count} 文 / {applied_rows} 行を適用しました（未コミット: {uncommitted_count}件）"
+                    );
+                    self.state
+                        .push_log("テーブル変更反映".to_string(), msg.clone(), false, None);
+                    self.state.status_notice = Some(msg);
+                    // 反映成功後はパッチを初期化し、最新 ROWID・DB 値で再読込する（自動 COMMIT しない）
+                    if let Some(ge) = self.state.grid_editor.as_mut() {
+                        ge.patch.clear();
+                        let owner = ge.table.owner.clone();
+                        let table_name = ge.table.table_name.clone();
+                        let where_clause = ge.where_input.clone();
+                        let order_by = ge.order_input.clone();
+                        self.state.busy = true;
+                        self.worker.send(DbCommand::LoadTableForEdit {
+                            owner,
+                            table_name,
+                            where_clause,
+                            order_by,
+                            fetch_limit: self.state.config.default_fetch_limit,
+                        });
+                    }
                 }
                 DbEvent::Error { context, message } => {
                     if context == "接続エラー" {
@@ -352,6 +417,26 @@ impl QuQuApp {
                     self.state.pending_select_insert_table = Some(table_name.clone());
                     self.worker.send(DbCommand::LoadColumns { owner, table_name });
                 }
+                AppAction::LoadTableForEdit {
+                    owner,
+                    table_name,
+                    where_clause,
+                    order_by,
+                } => {
+                    self.state.busy = true;
+                    self.worker.send(DbCommand::LoadTableForEdit {
+                        owner,
+                        table_name,
+                        where_clause,
+                        order_by,
+                        fetch_limit: self.state.config.default_fetch_limit,
+                    });
+                }
+                AppAction::ApplyGridDml { dmls, allow_write } => {
+                    self.state.busy = true;
+                    self.worker
+                        .send(DbCommand::ApplyGridDml { dmls, allow_write });
+                }
                 AppAction::SaveProfiles => {
                     if let Some(storage) = &self.state.storage {
                         let file = ConnectionsFile {
@@ -384,10 +469,10 @@ impl eframe::App for QuQuApp {
             AppTheme::for_mode(self.last_dark_mode).apply_to_ctx(ctx);
         }
 
-        // 未コミット変更がある状態でのウィンドウ終了をガードする
+        // 未コミット変更または未保存 SQL タブがある状態でのウィンドウ終了をガードする
         if ctx.input(|i| i.viewport().close_requested())
             && !self.state.allow_force_exit
-            && self.state.uncommitted_count > 0
+            && self.state.has_unsaved_work()
         {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             open_exit_confirm(&mut self.state);

@@ -27,12 +27,22 @@
 
 #![warn(missing_docs)]
 
+pub mod export;
+pub mod grid_edit;
 pub mod metadata;
 pub mod profile;
 pub mod result_set;
 pub mod tns;
 pub mod value;
 
+pub use export::{
+    export_csv, export_csv_with_header, export_insert_sql, export_tsv, format_sql_literal,
+    parse_tsv, quote_identifier,
+};
+pub use grid_edit::{
+    DisplayRowKind, EditableTableData, GridEditOp, GridPatch, InsertedRowSlot, ParameterizedDml,
+    RowKey, SelectionStats, SqlDialect, compute_selection_stats, parse_cell_input,
+};
 pub use metadata::{ColumnDetail, ObjectType, SchemaObject};
 pub use profile::{
     AppConfig, ConnectCredentials, ConnectionProfile, DbType, EnvironmentTier, OracleConnectMode,

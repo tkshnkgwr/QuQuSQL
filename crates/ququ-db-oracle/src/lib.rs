@@ -9,8 +9,9 @@ use anyhow::{Context, Result, anyhow};
 use compact_str::CompactString;
 use oracle_rs::{ColumnInfo, Config, Connection, Row, Value};
 use ququ_core::{
-    CellValue, ColumnDetail, ColumnMeta, ConnectCredentials, ConnectionProfile, ObjectType,
-    OracleConnectMode, ResultSet, SchemaObject, find_tnsnames_path, parse_tnsnames,
+    CellValue, ColumnDetail, ColumnMeta, ConnectCredentials, ConnectionProfile, EditableTableData,
+    ObjectType, OracleConnectMode, ParameterizedDml, ResultSet, RowKey, SchemaObject, SqlDialect,
+    find_tnsnames_path, parse_tnsnames, quote_identifier,
 };
 use ququ_db::DbSession;
 use std::fmt::Write as _;
@@ -402,9 +403,199 @@ impl DbSession for OracleSession {
         Ok(ddl)
     }
 
+    fn load_table_for_edit(
+        &mut self,
+        owner: &str,
+        table_name: &str,
+        where_clause: &str,
+        order_by: &str,
+        fetch_limit: usize,
+    ) -> Result<EditableTableData> {
+        let start = Instant::now();
+        let tbl_ident = if owner.trim().is_empty() {
+            quote_identifier(table_name, SqlDialect::Oracle)
+        } else {
+            format!(
+                "{}.{}",
+                quote_identifier(owner, SqlDialect::Oracle),
+                quote_identifier(table_name, SqlDialect::Oracle)
+            )
+        };
+
+        let mut suffix = String::new();
+        if !where_clause.trim().is_empty() {
+            suffix.push_str(&format!(" WHERE {}", where_clause.trim()));
+        }
+        if !order_by.trim().is_empty() {
+            suffix.push_str(&format!(" ORDER BY {}", order_by.trim()));
+        }
+
+        let rowid_sql = format!(
+            "SELECT ROWIDTOCHAR(t.ROWID) AS \"_QUQU_ROWID\", t.* FROM {tbl_ident} t{suffix}"
+        );
+        let fallback_sql = format!(
+            "SELECT CAST(NULL AS VARCHAR2(32)) AS \"_QUQU_ROWID\", t.* FROM {tbl_ident} t{suffix}"
+        );
+
+        let initial = match self.rt.block_on(self.conn.query(&rowid_sql, &[])) {
+            Ok(res) => res,
+            Err(_) => self.rt.block_on(self.conn.query(&fallback_sql, &[]))?,
+        };
+
+        let columns_info = initial.columns.clone();
+        let mut cursor_id = initial.cursor_id;
+        let mut has_more = initial.has_more_rows;
+        let columns = Self::convert_columns(columns_info.get(1..).unwrap_or(&[]));
+
+        let mut rs = ResultSet::with_columns(columns.clone());
+        rs.source_sql = Some(format!("SELECT * FROM {tbl_ident}{suffix}"));
+        let mut row_keys = Vec::new();
+
+        let extract_rows = |rows: Vec<Row>, rs: &mut ResultSet, row_keys: &mut Vec<Option<RowKey>>| {
+            for row in rows {
+                let mut vals = row.into_values().into_iter();
+                let key = match vals.next() {
+                    Some(Value::String(s)) if !s.is_empty() => Some(RowKey::RowId(s)),
+                    Some(Value::RowId(r)) => match r.to_string() {
+                        Some(s) if !s.is_empty() => Some(RowKey::RowId(s)),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                row_keys.push(key);
+                let cells = vals.map(convert_value).collect();
+                rs.push_row(cells);
+            }
+        };
+
+        extract_rows(initial.rows, &mut rs, &mut row_keys);
+        let limit = if fetch_limit == 0 {
+            usize::MAX
+        } else {
+            fetch_limit
+        };
+
+        while has_more && rs.row_count < limit {
+            let remaining = (limit - rs.row_count).min(500) as u32;
+            let next = self
+                .rt
+                .block_on(self.conn.fetch_more(cursor_id, &columns_info, remaining))?;
+            cursor_id = next.cursor_id;
+            has_more = next.has_more_rows;
+            if next.rows.is_empty() {
+                break;
+            }
+            extract_rows(next.rows, &mut rs, &mut row_keys);
+        }
+        rs.has_more = has_more && cursor_id > 0;
+        rs.elapsed_ms = start.elapsed().as_millis() as u64;
+
+        Ok(EditableTableData {
+            dialect: SqlDialect::Oracle,
+            owner: owner.to_string(),
+            table_name: table_name.to_string(),
+            where_clause: where_clause.to_string(),
+            order_by: order_by.to_string(),
+            columns,
+            row_keys,
+            result: rs,
+        })
+    }
+
+    fn apply_dml_batch(&mut self, dmls: &[ParameterizedDml]) -> Result<usize> {
+        if dmls.is_empty() {
+            return Ok(0);
+        }
+        self.pending_cursor = None;
+        self.rt
+            .block_on(self.conn.savepoint("ququ_grid_apply"))
+            .context("Oracle SAVEPOINT 開始に失敗しました")?;
+
+        let mut total_affected = 0usize;
+        for dml in dmls {
+            let params: Vec<Value> = dml.params.iter().map(cell_to_oracle_value).collect();
+            let exec_res = self
+                .rt
+                .block_on(self.conn.execute_dml_sql(&dml.sql, &params));
+            let affected = match exec_res {
+                Ok(cnt) => cnt,
+                Err(e) => {
+                    let _ = self
+                        .rt
+                        .block_on(self.conn.rollback_to_savepoint("ququ_grid_apply"));
+                    return Err(e).with_context(|| {
+                        format!(
+                            "Oracle DML 実行に失敗し SAVEPOINT へロールバックしました: {}",
+                            dml.preview_sql
+                        )
+                    });
+                }
+            };
+
+            if dml.expect_one_row && affected != 1 {
+                let _ = self
+                    .rt
+                    .block_on(self.conn.rollback_to_savepoint("ququ_grid_apply"));
+                anyhow::bail!(
+                    "対象行の整合性エラー: 1 行の予定が {affected} 行に影響したため SAVEPOINT へロールバックしました: {}",
+                    dml.preview_sql
+                );
+            }
+            total_affected += affected as usize;
+        }
+
+        // 自動 COMMIT せず未コミット件数のみ加算してユーザーの手動確定を待つ
+        self.uncommitted_ops += dmls.len();
+        Ok(total_affected)
+    }
+
     fn db_info(&self) -> String {
         format!("Oracle ({})", self.target_label)
     }
+}
+
+/// QuQuSQL の [`CellValue`] を `oracle-rs` のバインド用 [`Value`] へ変換する。
+fn cell_to_oracle_value(cell: &CellValue) -> Value {
+    use oracle_rs::types::{OracleDate, OracleNumber};
+    match cell {
+        CellValue::Null => Value::Null,
+        CellValue::Bool(b) => Value::Boolean(*b),
+        CellValue::Int(i) => Value::Integer(*i),
+        CellValue::Float(f) => Value::Float(*f),
+        CellValue::Decimal(s) => Value::Number(OracleNumber::new(s.trim())),
+        CellValue::Text(s) => Value::String(s.to_string()),
+        CellValue::DateTime(s) => {
+            if let Some((date_part, time_part)) = s.trim().split_once(' ')
+                && let Some((y_s, m_s, d_s)) = split3(date_part, '-')
+                && let Some((hh_s, mm_s, ss_s)) = split3(time_part, ':')
+                && let (Ok(y), Ok(m), Ok(d), Ok(hh), Ok(mm), Ok(ss)) = (
+                    y_s.parse::<i32>(),
+                    m_s.parse::<u8>(),
+                    d_s.parse::<u8>(),
+                    hh_s.parse::<u8>(),
+                    mm_s.parse::<u8>(),
+                    ss_s.parse::<u8>(),
+                )
+            {
+                Value::Date(OracleDate::new(y, m, d, hh, mm, ss))
+            } else {
+                Value::String(s.to_string())
+            }
+        }
+        CellValue::Bytes(b) => Value::Bytes(b.to_vec()),
+    }
+}
+
+/// 区切り文字で厳密に 3 分割する補助関数。
+fn split3(s: &str, delim: char) -> Option<(&str, &str, &str)> {
+    let mut parts = s.split(delim);
+    let a = parts.next()?;
+    let b = parts.next()?;
+    let c = parts.next()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some((a, b, c))
 }
 
 /// `oracle-rs` の `Value` を QuQuSQL の省メモリ `CellValue`（ISO 日時・厳密 NUMBER 保持）へ変換する。
@@ -544,6 +735,21 @@ SID_ALIAS = (DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=10.0.0.2)(PORT=1522))(CONN
 
         assert_eq!(convert_value(Value::Null), CellValue::Null);
         assert_eq!(convert_value(Value::Boolean(false)), CellValue::Bool(false));
+    }
+
+    #[test]
+    fn converts_cell_value_to_oracle_bind_value() {
+        use oracle_rs::types::OracleDate;
+        assert!(matches!(cell_to_oracle_value(&CellValue::Null), Value::Null));
+        assert!(matches!(cell_to_oracle_value(&CellValue::Int(42)), Value::Integer(42)));
+        assert!(matches!(
+            cell_to_oracle_value(&CellValue::Decimal("123.45".into())),
+            Value::Number(ref n) if n.as_str() == "123.45"
+        ));
+        assert!(matches!(
+            cell_to_oracle_value(&CellValue::DateTime("2026-11-27 10:20:30".into())),
+            Value::Date(d) if d == OracleDate::new(2026, 11, 27, 10, 20, 30)
+        ));
     }
 
     #[test]

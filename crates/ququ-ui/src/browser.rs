@@ -107,6 +107,7 @@ pub fn render_object_list_pane(
         let mut copy_text: Option<String> = None;
         let mut load_ddl_target: Option<(String, ObjectType, String)> = None;
         let mut full_select_target: Option<(usize, String, String)> = None;
+        let mut edit_grid_target: Option<(String, String)> = None;
 
         TableBuilder::new(ui)
             .id_salt("object_list_table")
@@ -151,6 +152,12 @@ pub fn render_object_list_pane(
                             insert_text = Some(obj.name.clone());
                         }
                         resp.context_menu(|ui| {
+                            if matches!(obj.object_type, ObjectType::Table | ObjectType::View)
+                                && ui.button("グリッドで開く").clicked()
+                            {
+                                edit_grid_target = Some((obj.owner.clone(), obj.name.clone()));
+                                ui.close_menu();
+                            }
                             if ui.button("エディタへ名前挿入").clicked() {
                                 insert_text = Some(obj.name.clone());
                                 ui.close_menu();
@@ -236,6 +243,17 @@ pub fn render_object_list_pane(
             });
         }
 
+        // 右クリック「グリッドで開く (OSqlGrid)」の処理
+        if let Some((owner, table_name)) = edit_grid_target {
+            state.bottom_tab = crate::state::BottomTab::Grid;
+            actions.push(AppAction::LoadTableForEdit {
+                owner,
+                table_name,
+                where_clause: String::new(),
+                order_by: String::new(),
+            });
+        }
+
         if let Some(snippet) = insert_text {
             state.insert_into_active_editor(&snippet);
         }
@@ -289,6 +307,8 @@ pub fn render_object_detail_pane(ui: &mut Ui, state: &mut UiState, theme: &AppTh
 
         let mut new_col_selection: Option<usize> = None;
         let mut insert_col: Option<String> = None;
+        let mut copy_col_name: Option<String> = None;
+        let mut copy_all_cols = false;
 
         TableBuilder::new(ui)
             .id_salt("column_detail_table")
@@ -337,38 +357,40 @@ pub fn render_object_detail_pane(ui: &mut Ui, state: &mut UiState, theme: &AppTh
                             RichText::new(&col.name)
                         };
                         ui.add(egui::Label::new(label).selectable(false));
-                        let resp = ui
-                            .interact(
-                                ui.max_rect(),
-                                ui.id().with(("col_cell", orig_idx, 0)),
-                                Sense::click(),
-                            )
-                            .on_hover_cursor(egui::CursorIcon::PointingHand);
-                        if resp.clicked() {
-                            new_col_selection = Some(orig_idx);
-                        }
-                        if resp.double_clicked() {
-                            insert_col = Some(col.name.clone());
-                        }
+                        let resp = ui.interact(
+                            ui.max_rect(),
+                            ui.id().with(("col_cell", orig_idx, 0)),
+                            Sense::click(),
+                        );
+                        handle_column_cell_interaction(
+                            resp,
+                            orig_idx,
+                            &col.name,
+                            &mut new_col_selection,
+                            &mut insert_col,
+                            &mut copy_col_name,
+                            &mut copy_all_cols,
+                        );
                     });
                     row.col(|ui| {
                         if is_selected {
                             ui.painter().rect_filled(ui.max_rect(), 0.0, theme.grid_selected_bg);
                         }
                         ui.add(egui::Label::new(&col.data_type).selectable(false));
-                        let resp = ui
-                            .interact(
-                                ui.max_rect(),
-                                ui.id().with(("col_cell", orig_idx, 1)),
-                                Sense::click(),
-                            )
-                            .on_hover_cursor(egui::CursorIcon::PointingHand);
-                        if resp.clicked() {
-                            new_col_selection = Some(orig_idx);
-                        }
-                        if resp.double_clicked() {
-                            insert_col = Some(col.name.clone());
-                        }
+                        let resp = ui.interact(
+                            ui.max_rect(),
+                            ui.id().with(("col_cell", orig_idx, 1)),
+                            Sense::click(),
+                        );
+                        handle_column_cell_interaction(
+                            resp,
+                            orig_idx,
+                            &col.name,
+                            &mut new_col_selection,
+                            &mut insert_col,
+                            &mut copy_col_name,
+                            &mut copy_all_cols,
+                        );
                     });
                     row.col(|ui| {
                         if is_selected {
@@ -377,19 +399,20 @@ pub fn render_object_detail_pane(ui: &mut Ui, state: &mut UiState, theme: &AppTh
                         ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
                             ui.add(egui::Label::new(&col.length).selectable(false));
                         });
-                        let resp = ui
-                            .interact(
-                                ui.max_rect(),
-                                ui.id().with(("col_cell", orig_idx, 2)),
-                                Sense::click(),
-                            )
-                            .on_hover_cursor(egui::CursorIcon::PointingHand);
-                        if resp.clicked() {
-                            new_col_selection = Some(orig_idx);
-                        }
-                        if resp.double_clicked() {
-                            insert_col = Some(col.name.clone());
-                        }
+                        let resp = ui.interact(
+                            ui.max_rect(),
+                            ui.id().with(("col_cell", orig_idx, 2)),
+                            Sense::click(),
+                        );
+                        handle_column_cell_interaction(
+                            resp,
+                            orig_idx,
+                            &col.name,
+                            &mut new_col_selection,
+                            &mut insert_col,
+                            &mut copy_col_name,
+                            &mut copy_all_cols,
+                        );
                     });
                     row.col(|ui| {
                         if is_selected {
@@ -399,38 +422,40 @@ pub fn render_object_detail_pane(ui: &mut Ui, state: &mut UiState, theme: &AppTh
                             egui::Label::new(if col.nullable { "Y" } else { "N" })
                                 .selectable(false),
                         );
-                        let resp = ui
-                            .interact(
-                                ui.max_rect(),
-                                ui.id().with(("col_cell", orig_idx, 3)),
-                                Sense::click(),
-                            )
-                            .on_hover_cursor(egui::CursorIcon::PointingHand);
-                        if resp.clicked() {
-                            new_col_selection = Some(orig_idx);
-                        }
-                        if resp.double_clicked() {
-                            insert_col = Some(col.name.clone());
-                        }
+                        let resp = ui.interact(
+                            ui.max_rect(),
+                            ui.id().with(("col_cell", orig_idx, 3)),
+                            Sense::click(),
+                        );
+                        handle_column_cell_interaction(
+                            resp,
+                            orig_idx,
+                            &col.name,
+                            &mut new_col_selection,
+                            &mut insert_col,
+                            &mut copy_col_name,
+                            &mut copy_all_cols,
+                        );
                     });
                     row.col(|ui| {
                         if is_selected {
                             ui.painter().rect_filled(ui.max_rect(), 0.0, theme.grid_selected_bg);
                         }
                         ui.add(egui::Label::new(&col.comments).selectable(false));
-                        let resp = ui
-                            .interact(
-                                ui.max_rect(),
-                                ui.id().with(("col_cell", orig_idx, 4)),
-                                Sense::click(),
-                            )
-                            .on_hover_cursor(egui::CursorIcon::PointingHand);
-                        if resp.clicked() {
-                            new_col_selection = Some(orig_idx);
-                        }
-                        if resp.double_clicked() {
-                            insert_col = Some(col.name.clone());
-                        }
+                        let resp = ui.interact(
+                            ui.max_rect(),
+                            ui.id().with(("col_cell", orig_idx, 4)),
+                            Sense::click(),
+                        );
+                        handle_column_cell_interaction(
+                            resp,
+                            orig_idx,
+                            &col.name,
+                            &mut new_col_selection,
+                            &mut insert_col,
+                            &mut copy_col_name,
+                            &mut copy_all_cols,
+                        );
                     });
                 });
             });
@@ -440,6 +465,56 @@ pub fn render_object_detail_pane(ui: &mut Ui, state: &mut UiState, theme: &AppTh
         }
         if let Some(col_name) = insert_col {
             state.insert_into_active_editor(&col_name);
+        }
+        if let Some(name) = copy_col_name {
+            ui.ctx().copy_text(name.clone());
+            state.status_notice = Some(format!("カラム名「{name}」をコピーしました。"));
+        }
+        if copy_all_cols && !filtered.is_empty() {
+            let joined = filtered
+                .iter()
+                .map(|&idx| state.columns[idx].name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            ui.ctx().copy_text(joined);
+            state.status_notice = Some(format!(
+                "表示中の全カラム名（{}件）をコピーしました。",
+                filtered.len()
+            ));
+        }
+    });
+}
+
+/// カラム詳細テーブルのセルクリック・ダブルクリック・右クリックメニューを共通処理する。
+fn handle_column_cell_interaction(
+    resp: egui::Response,
+    orig_idx: usize,
+    col_name: &str,
+    new_col_selection: &mut Option<usize>,
+    insert_col: &mut Option<String>,
+    copy_col_name: &mut Option<String>,
+    copy_all_cols: &mut bool,
+) {
+    let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+    if resp.clicked() || resp.secondary_clicked() {
+        *new_col_selection = Some(orig_idx);
+    }
+    if resp.double_clicked() {
+        *insert_col = Some(col_name.to_string());
+    }
+    resp.context_menu(|ui| {
+        if ui.button("カラム名をコピー").clicked() {
+            *copy_col_name = Some(col_name.to_string());
+            ui.close_menu();
+        }
+        if ui.button("エディタへカラム名を挿入").clicked() {
+            *insert_col = Some(col_name.to_string());
+            ui.close_menu();
+        }
+        ui.separator();
+        if ui.button("全カラム名をコピー (カンマ区切り)").clicked() {
+            *copy_all_cols = true;
+            ui.close_menu();
         }
     });
 }

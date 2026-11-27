@@ -8,6 +8,26 @@
 
 ---
 
+## [0.0.4-alpha] - 2026-11-27
+
+### Added (Phase 2: テーブル直接編集・UI 強化)
+- **直接編集モデル・エクスポート基盤 (`ququ-core`)**:
+  - `EditableTableData`, `RowKey`, `GridPatch`（セル編集・行追加/複製/削除マーク・ステップ単位 Undo/Redo・矩形選択統計 `SelectionStats`）を追加。
+  - `parse_tsv`（Excel 形式クォート・セル内改行対応）、`export_csv`、`export_csv_with_header`、`export_tsv`、`export_insert_sql`、`format_sql_literal` を実装。
+- **最小差分パラメータ化 DML 生成 (`ququ-sql`)**:
+  - `generate_grid_dml` により削除（DELETE）→ 変更列のみ最小更新（UPDATE）→ 新規挿入（INSERT）をパラメータ化 SQL（SQLite `?n` / Oracle `:n` + `CHARTOROWID`）および確認モーダル用プレビュー文として生成。
+- **SAVEPOINT 保護下のバッチ適用 (`ququ-db`, `ququ-db-sqlite`, `ququ-db-oracle`)**:
+  - `DbSession::load_table_for_edit` と `DbSession::apply_dml_batch` を追加し、`SAVEPOINT ququ_grid_apply` と厳密 1 行更新/削除検証（失敗時は全バッチロールバック、自動 `COMMIT` なし）を実装。
+  - 読み取り専用セッション時の `ApplyGridDml` ブロックを追加。
+- **グリッド編集・範囲コピー・UI/UX 改善 (`ququ-ui`, `ququ-app`)**:
+  - オブジェクトブラウザ右クリック「グリッドで開く」、`WHERE` / `ORDER BY` 絞り込み再読込、セルインライン編集（ダブルクリック / `F2`）・`NULL` 設定（`Del`）・行追加/複製/削除・`Undo`/`Redo`・差分セル着色（更新黄・挿入緑・削除赤）、適用前 SQL プレビュー確認モーダル、`Rollback` 後の自動再読込に対応。
+  - マウスドラッグ・`Shift+クリック`・行/列ヘッダクリックによる複数セル矩形選択、リアルタイム集計（セル数・数値件数・合計・平均・最小・最大）、選択範囲の TSV / CSV コピー（カラム名あり／なし両対応）、CSV / TSV / INSERT 文ファイル保存を追加。
+  - サイドバーのカラム詳細で右クリックによる「カラム名をコピー」「全カラム名をコピー (カンマ区切り)」を追加。
+  - ログペインの右クリックメニュー（「ログのコピー」「ログのクリア」）を追加し、ペイン全体（右側余白含む）で右クリックが反応するよう改善。
+  - Zed 風の SQL タブバー（左右横移動ボタン `←`/`→`・横スクロール・各タブの `×` 閉じるボタン）と、アプリ終了時の未保存 SQL タブ警告を追加し、豆腐文字（`✕`）を解消。
+
+---
+
 ## [0.0.3-alpha] - 2026-11-27
 
 ### Fixed / Improved

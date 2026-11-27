@@ -115,6 +115,11 @@ pub enum ConfirmAction {
         /// 未コミット操作件数
         uncommitted_count: usize,
     },
+    /// テーブル直接編集の差分 DML バッチ適用確認
+    ApplyGridDml {
+        /// 適用予定のパラメータ化 DML 群
+        dmls: Vec<ququ_core::ParameterizedDml>,
+    },
 }
 
 /// 誤操作防止のための確認モーダル表示状態。
@@ -233,12 +238,113 @@ pub enum AppAction {
         /// テーブル名
         table_name: String,
     },
+    /// OSqlGrid 直接編集向けにテーブルデータと ROWID を読み込む
+    LoadTableForEdit {
+        /// スキーマ名
+        owner: String,
+        /// テーブル名
+        table_name: String,
+        /// WHERE 句
+        where_clause: String,
+        /// ORDER BY 句
+        order_by: String,
+    },
+    /// OSqlGrid の差分 DML バッチを SAVEPOINT 保護下で DB へ適用する
+    ApplyGridDml {
+        /// パラメータ化 DML 群
+        dmls: Vec<ququ_core::ParameterizedDml>,
+        /// 書き込み許可フラグ
+        allow_write: bool,
+    },
     /// 接続プロファイル保存
     SaveProfiles,
     /// アプリ設定保存
     SaveConfig,
     /// 未コミット確認後の強制終了実行
     ConfirmExitClose,
+}
+
+/// テーブル直接編集モードの状態（テーブルデータ・差分パッチ・選択矩形・インライン編集）。
+#[derive(Debug, Clone)]
+pub struct GridEditorState {
+    /// 読み込んだテーブルデータと行識別キー
+    pub table: ququ_core::EditableTableData,
+    /// 差分変更および Undo/Redo スタック
+    pub patch: ququ_core::GridPatch,
+    /// フィルタ欄の WHERE 句入力文字列
+    pub where_input: String,
+    /// ソート欄の ORDER BY 句入力文字列
+    pub order_input: String,
+    /// 範囲選択の始点 `(display_row, col)`
+    pub selection_anchor: Option<(usize, usize)>,
+    /// 範囲選択の終点 `(display_row, col)`
+    pub selection_focus: Option<(usize, usize)>,
+    /// マウスドラッグによる複数セル範囲選択中かどうか
+    pub is_selecting: bool,
+    /// インライン編集中のセル座標 `(logical_row, col)`
+    pub editing_cell: Option<(usize, usize)>,
+    /// インライン編集中のテキストバッファ
+    pub edit_buffer: String,
+    /// 編集開始直後の初回フォーカス要求フラグ
+    pub edit_just_started: bool,
+}
+
+impl GridEditorState {
+    /// 読み込んだ [`ququ_core::EditableTableData`] から初期編集状態を構築する。
+    pub fn from_table(table: ququ_core::EditableTableData) -> Self {
+        let patch = ququ_core::GridPatch::new(table.result.row_count, table.columns.len());
+        let where_input = table.where_clause.clone();
+        let order_input = table.order_by.clone();
+        Self {
+            table,
+            patch,
+            where_input,
+            order_input,
+            selection_anchor: None,
+            selection_focus: None,
+            is_selecting: false,
+            editing_cell: None,
+            edit_buffer: String::new(),
+            edit_just_started: false,
+        }
+    }
+
+    /// 現在の矩形選択範囲 `(min_row, max_row, min_col, max_col)`（表示行基準）を返す。
+    pub fn selected_rect(&self) -> Option<(usize, usize, usize, usize)> {
+        let focus = self.selection_focus?;
+        let anchor = self.selection_anchor.unwrap_or(focus);
+        Some((
+            anchor.0.min(focus.0),
+            anchor.0.max(focus.0),
+            anchor.1.min(focus.1),
+            anchor.1.max(focus.1),
+        ))
+    }
+
+    /// 選択範囲内のセル統計情報を計算する。
+    pub fn selection_stats(&self) -> Option<ququ_core::SelectionStats> {
+        let (r0, r1, c0, c1) = self.selected_rect()?;
+        let display_rows = self.patch.display_rows();
+        let mut cells = Vec::new();
+        for disp_row in r0..=r1 {
+            let Some(kind) = display_rows.get(disp_row) else {
+                continue;
+            };
+            let logical_row = match *kind {
+                ququ_core::DisplayRowKind::Existing { logical_row, .. }
+                | ququ_core::DisplayRowKind::Inserted { logical_row } => logical_row,
+            };
+            for col in c0..=c1 {
+                if col < self.table.columns.len() {
+                    cells.push(self.patch.cell_value(&self.table, logical_row, col));
+                }
+            }
+        }
+        if cells.is_empty() {
+            return None;
+        }
+        Some(ququ_core::compute_selection_stats(cells))
+    }
 }
 
 /// QuQuSQL GUI 全体のアプリケーション状態。
@@ -269,6 +375,8 @@ pub struct UiState {
     pub tabs: Vec<SqlTab>,
     /// アクティブなタブのインデックス
     pub active_tab: usize,
+    /// タブバーの横スクロールオフセット
+    pub tab_scroll_offset: f32,
     /// 次に割り当てるタブ ID
     pub next_tab_id: usize,
     /// 検索・置換パネル状態
@@ -280,8 +388,14 @@ pub struct UiState {
     pub logs: Vec<QueryLogEntry>,
     /// 最新の SELECT 結果セット
     pub result: Option<ResultSet>,
-    /// 結果グリッドで選択中のセル `(row, col)`
+    /// 結果グリッドで選択中の終点セル `(row, col)`
     pub selected_cell: Option<(usize, usize)>,
+    /// 結果グリッドで矩形選択する際の始点セル `(row, col)`
+    pub selection_anchor: Option<(usize, usize)>,
+    /// 結果グリッド上でマウスドラッグによる範囲選択中かどうか
+    pub grid_selecting: bool,
+    /// テーブル直接編集モードの状態（有効時はこちらを優先描画する）
+    pub grid_editor: Option<GridEditorState>,
 
     /// スキーマ一覧
     pub owners: Vec<String>,
@@ -353,12 +467,16 @@ impl UiState {
             busy: false,
             tabs: vec![initial_tab],
             active_tab: 0,
+            tab_scroll_offset: 0.0,
             next_tab_id: 2,
             find_replace: FindReplaceState::default(),
             bottom_tab: BottomTab::Log,
             logs: Vec::new(),
             result: None,
             selected_cell: None,
+            selection_anchor: None,
+            grid_selecting: false,
+            grid_editor: None,
             owners: Vec::new(),
             selected_owner: String::new(),
             selected_object_type: ObjectType::Table,
@@ -425,6 +543,20 @@ impl UiState {
             .is_some_and(|p| p.env == EnvironmentTier::Production)
     }
 
+    /// 未保存（`dirty == true`）の SQL タブタイトル一覧を返す。
+    pub fn dirty_tab_titles(&self) -> Vec<String> {
+        self.tabs
+            .iter()
+            .filter(|t| t.dirty)
+            .map(|t| t.title.clone())
+            .collect()
+    }
+
+    /// 未コミット変更または未保存 SQL タブが存在するかを返す（終了確認ガード用）。
+    pub fn has_unsaved_work(&self) -> bool {
+        self.uncommitted_count > 0 || self.tabs.iter().any(|t| t.dirty)
+    }
+
     /// 実行ログエントリを追加する（最大 500 件まで保持）。
     pub fn push_log(
         &mut self,
@@ -470,5 +602,35 @@ impl UiState {
             ),
             None => format!("(未接続) - QuQuSQL - [{tab_label}]"),
         }
+    }
+
+    /// 現在表示中のグリッド（OSqlGrid または SQL 結果グリッド）における選択矩形の統計情報を返す。
+    pub fn active_selection_stats(&self) -> Option<ququ_core::SelectionStats> {
+        if let Some(ge) = &self.grid_editor {
+            return ge.selection_stats();
+        }
+        let rs = self.result.as_ref()?;
+        let focus = self.selected_cell?;
+        let anchor = self.selection_anchor.unwrap_or(focus);
+        let r0 = anchor.0.min(focus.0);
+        let r1 = anchor.0.max(focus.0);
+        let c0 = anchor.1.min(focus.1);
+        let c1 = anchor.1.max(focus.1);
+
+        let mut cells = Vec::new();
+        for r in r0..=r1 {
+            if r >= rs.row_count {
+                break;
+            }
+            for c in c0..=c1 {
+                if let Some(v) = rs.get(r, c) {
+                    cells.push(v);
+                }
+            }
+        }
+        if cells.is_empty() {
+            return None;
+        }
+        Some(ququ_core::compute_selection_stats(cells))
     }
 }

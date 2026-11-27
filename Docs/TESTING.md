@@ -12,11 +12,11 @@ GUI（`egui`）を起動せずとも、コアデータ構造・SQL 解析・ワ�
 
 | クレート | テスト種別 | 主な検証項目 |
 | :--- | :--- | :--- |
-| **`ququ-core`** | 単体＋Doctest | `ResultSet` のフラット配列アクセス＆結合、`CellValue`（`Decimal` 高精度保持・`write_display_into`・`Bytes`）、`ObjectType::from_db_str`、`EnvironmentTier` プリセット、`ConnectionProfile`（パスワード非シリアライズ・`display_target`）、`tnsnames.ora` パーサ |
-| **`ququ-sql`** | 単体＋Doctest | トークナイザ（バインド変数・エスケープ文字列・日本語識別子）、SQL 文分割（文字列・コメント内の `;` 無視・末尾セミコロン省略）、カーソル位置抽出、`StatementKind` 判定、`WHERE` 句なし `UPDATE` / `DELETE` 検知 |
-| **`ququ-db`** | 結合（モック） | モック `DbSession` による `DbWorker` 非同期テスト（`allow_write = false` 時の DML/DDL/COMMIT 拒否、DDL 時の `is_ddl = true` 返却、`LoadDdl` 連携） |
-| **`ququ-db-sqlite`** | 結合テスト | インメモリ SQLite に対するクエリ実行、1,000 行フェッチ上限＆追加取得、メタデータ取得、DDL 取得（`sqlite_master`）、手動トランザクション（Commit / Rollback 復元）、全データ型ラウンドトリップ |
-| **`ququ-db-oracle`** | 単体＋実機統合 | `oracle-rs` Direct / `tnsnames.ora` 設定解決とバリデーション、Oracle `Value` 変換（25 桁 `NUMBER` 厳密保持、ISO 日時、`Null`）。実機接続テストは `#[ignore]` 付きで環境変数指定時のみ実行 |
+| **`ququ-core`** | 単体＋Doctest | `ResultSet` のフラット配列アクセス＆結合、`CellValue`（`Decimal` 高精度保持・`write_display_into`・`Bytes`）、`ObjectType::from_db_str`、`EnvironmentTier` プリセット、`ConnectionProfile`（パスワード非シリアライズ・`display_target`）、`tnsnames.ora` パーサ、**`GridPatch`（Undo/Redo・行追加/複製/削除）、`SelectionStats` 集計、`parse_tsv`（Excel クォート改行）、CSV/TSV/INSERT エクスポート** |
+| **`ququ-sql`** | 単体＋Doctest | トークナイザ（バインド変数・エスケープ文字列・日本語識別子）、SQL 文分割（文字列・コメント内の `;` 無視・末尾セミコロン省略）、カーソル位置抽出、`StatementKind` 判定、`WHERE` 句なし `UPDATE` / `DELETE` 検知、**`generate_grid_dml`（SQLite `?n` / Oracle `CHARTOROWID(:n)` 最小列 UPDATE・DELETE・INSERT 生成）** |
+| **`ququ-db`** | 結合（モック） | モック `DbSession` による `DbWorker` 非同期テスト（`allow_write = false` 時の DML/DDL/COMMIT/`ApplyGridDml` 拒否、DDL 時の `is_ddl = true` 返却、`LoadDdl` / `ApplyGridDml` 連携） |
+| **`ququ-db-sqlite`** | 結合テスト | インメモリ SQLite に対するクエリ実行、1,000 行フェッチ上限＆追加取得、メタデータ取得、DDL 取得（`sqlite_master`）、手動トランザクション（Commit / Rollback 復元）、全データ型ラウンドトリップ、**`load_table_for_edit`（WHERE/ORDER BY・`rowid` 取得）と `SAVEPOINT ququ_grid_apply` によるバッチ適用／エラー時ロールバック** |
+| **`ququ-db-oracle`** | 単体＋実機統合 | `oracle-rs` Direct / `tnsnames.ora` 設定解決とバリデーション、Oracle `Value` 変換（25 桁 `NUMBER` 厳密保持、ISO 日時、`Null`、**`cell_to_oracle_value` バインド値変換**）。実機接続テストは `#[ignore]` 付きで環境変数指定時のみ実行 |
 | **`ququ-ui`** | 単体テスト | 検索＆置換ロジック（大文字小文字区別・正規表現・日本語オフセット行列変換）、TSV エクスポート（Excel 互換エスケープ・NULL 表現）、全項目 SELECT 文フォーマット、`parse_hex_color` フォールバック |
 
 ---
