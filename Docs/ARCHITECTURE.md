@@ -70,13 +70,15 @@ graph TD
   - 行ごとの `Vec<HashMap<String, String>>` のような重い構造は**禁止**。
   - 列メタデータ（`Vec<ColumnMeta>`）を 1 回だけ保持し、セル本体は **フラットな 1 次元配列 `Vec<CellValue>`**（インデックス = `row * col_count + col`）または列指向チャンクで保持し、ポインタオーバーヘッドとヒープ断片化を最小化。
 - **コンパクトセル型 (`CellValue`)**:
-  - `Null`, `Bool(bool)`, `Int(i64)`, `Float(f64)`, `Text(CompactString)`, `Bytes(Arc<[u8]>)` 等で表現。
+  - `Null`, `Bool(bool)`, `Int(i64)`, `Float(f64)`, `Decimal(CompactString)`, `Text(CompactString)`, `Bytes(Arc<[u8]>)` 等で表現。
+  - **Oracle `NUMBER` 精度保証**: 16 桁以上の数値 ID や金額が `f64` で丸められないよう、`Decimal(CompactString)` として厳密保持する。
   - 24 バイト以下の短い文字列はインライン格納（`compact_str` クレート活用）し、大量セル取得時のヒープアロケーションを劇的に削減。
 - **グリッド差分モデル (`GridPatch` / `RowEditState`)**:
   - 元データ（`ResultSet`）はイミュータブルまたは共有参照とし、編集差分だけをスパースなマップ（`(row_idx, col_idx) -> CellValue`、追加行リスト、削除行セット）で管理。これにより 10 万行中 3 セル編集してもメモリ増加は数 KB に抑えられる。
 - **エンコーディング & エクスポート**:
   - `encoding_rs` を用いた Shift_JIS / EUC-JP / UTF-8 の高速自動判別・変換。
   - CSV / TSV（RFC 4180＋Excel 互換改行エスケープ）のストリーミング読み書き。
+  - **テーブル仕様書ジェネレータ**: 複数テーブルのメタデータ（カラム・インデックス・制約・コメント）から、Pure Rust の **`rust_xlsxwriter`** を用いた Excel（`.xlsx`）定義書および Markdown（`.md`）定義書を高速生成。
 - **接続プロファイル・設定**:
   - TOML 形式での軽量設定保存、環境識別カラー設定、`tnsnames.ora` パーサ。
 
@@ -97,7 +99,8 @@ graph TD
 ### 3.3 `ququ-db` およびドライバクレート群
 - **統一トレイト設計**:
   - `DbDriver`: 接続確立、対応機能フラグ（`supports_rowid`, `supports_explain_plan`, `supports_dbms_output` 等）の宣言。
-  - `DbSession`: クエリ実行（ストリーミング/チャンクフェッチ）、実行キャンセルハンドル、トランザクション制御（`commit` / `rollback`）、メタデータ取得（スキーマ一覧、オブジェクト一覧、カラム・インデックス・制約・トリガ・権限・DDL 取得）。
+  - `DbSession`: クエリ実行（ストリーミング/チャンクフェッチ）、実行キャンセルハンドル、トランザクション制御（`commit` / `rollback`）、メタデータ取得（スキーマ一覧、オブジェクト一覧、カラム・インデックス・制約・トリガ・権限・**DDL 取得**）。
+    - Oracle の DDL 取得は `DBMS_METADATA.GET_DDL` を優先し、権限不足エラー時はディクショナリビューから DDL を再構築するフォールバックを備える。SQLite は `sqlite_master` から取得。
 - **非同期実行ワーカー（UI 非ブロッキング）**:
   - UI スレッドとは独立した専用ワーカースレッド（または軽量 `tokio` ランタイム）上で DB セッションを保持。
   - 通信は `crossbeam-channel` 等の高速チャネルで `DbRequest` / `DbEvent` をやり取りし、イベント到着時のみ `egui::Context::request_repaint()` を呼ぶ。
@@ -121,7 +124,8 @@ graph TD
   - メタデータはスキーマ単位でキャッシュし、フィルタ入力時はキャッシュに対して即座に絞り込み（DB への無駄な再問い合わせを防止）。
 
 ### 3.5 `ququ-app`
-- `eframe` によるネイティブウィンドウ起動とイベントループ管理。
+- `eframe`（描画バックエンド: **`glow` / OpenGL**）による軽量・高速ネイティブウィンドウ起動とイベントループ管理。
+- **1 ウィンドウ ＝ 1 DB セッション** モデルにより、全タブ間で接続・トランザクション状態を一貫管理。
 - グローバルアロケータに **`mimalloc`** を採用し、GUI 描画や大量結果セット処理時のアロケーション遅延・メモリ断片化を抑制。
 - ウィンドウサイズ・ペイン分割比率・開いていたタブ・接続履歴の高速な保存と復元。
 
@@ -145,4 +149,5 @@ graph TD
 2. **Oracle 接続方式（決定済み）**: **Pure Rust 方式（`oracle-rs`）**。Instant Client 不要の単一バイナリ構成。
 3. **エディタ実装アプローチ（決定済み）**: **`egui::TextEdit` からの段階移行**（Phase 1 は `TextEdit`＋カスタム `Layouter`、Phase 3 で `ropey` 独自エディタへ移行）。
 4. **初期スコープ整理（決定済み）**: PL/SQL 支援・マクロ機能は初期対象外、パスワードは都度入力、デフォルト文字コードは UTF-8、実行計画はインデントテキスト出力。
-5. **ターゲット OS（決定済み）**: まずは **Windows 10 / 11 (x86_64)** 対応から開始（詳細は [TODO.md](./TODO.md) を参照）。
+5. **ターゲット OS（決定済み）**: まずは **Windows 10 / 11 (x86_64)** 対応から開始。
+6. **セッション・描画・データ規約（決定済み）**: **1 ウィンドウ ＝ 1 接続**（OSqlEdit 方式）、描画バックエンドは **`glow`**、SQL 区切りは **セミコロン `;`**、初期フェッチ上限 **1,000 行**、`DATE` 表示は **ISO 形式**、`NUMBER` は **厳密保持（`Decimal(CompactString)`）**（詳細は [TODO.md](./TODO.md) を参照）。
